@@ -1,0 +1,23 @@
+# Generated sandbox Containerfiles (normally written under XDG config)
+Containerfile.pi-sandbox*
+
+# Local environment/config files
+.env
+.env.*
+*.local
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Editor/OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
