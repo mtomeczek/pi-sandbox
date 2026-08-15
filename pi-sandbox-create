@@ -3,7 +3,8 @@ set -euo pipefail
 
 # pi-sandbox-create: administrator tool to create/build Pi sandbox images.
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")" || { printf 'error: cannot resolve script path\n' >&2; exit 1; }
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-create.md"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
@@ -287,6 +288,10 @@ build_image() {
 }
 
 confirm() { (( YES )) && return 0; [[ -t 0 ]] || { err "$1 requires confirmation; rerun with --yes"; return 1; }; local answer; read -r -p "$1 [y/N] " answer; [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]; }
+
+if [[ ${1:-} == "--install" || ${1:-} == "--remove" ]]; then
+    exec "${SCRIPT_DIR}/pi-sandbox-run" "$@"
+fi
 
 # Find --config before loading configuration so CLI can select another file.
 args=("$@")

@@ -43,6 +43,14 @@ pi-sandbox-create rust --regenerate-containerfile --no-cache
 - `--container-uid UID` — runtime user UID.
 - `--container-gid GID` — runtime user GID.
 
+## User installation
+
+- `--install` — create user-local symlinks for `pi-sandbox`, `pi-sandbox-run`, and `pi-sandbox-create`.
+- `--remove` — remove user-local symlinks created by `--install`.
+
+Symlinks are stored in `${XDG_BIN_HOME:-$HOME/.local/bin}`. Installation refuses
+to replace regular files or unrelated symlinks.
+
 ## Information
 
 - `--info` — show resolved build configuration.
