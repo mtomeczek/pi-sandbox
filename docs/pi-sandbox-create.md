@@ -45,7 +45,7 @@ pi-sandbox-create rust --regenerate-containerfile --no-cache
 
 ## User installation
 
-- `--install` — create user-local symlinks for `pi-sandbox`, `pi-sandbox-run`, and `pi-sandbox-create`.
+- `--install` — create user-local symlinks for `pi-sandbox-run` and `pi-sandbox-create`.
 - `--remove` — remove user-local symlinks created by `--install`.
 
 Symlinks are stored in `${XDG_BIN_HOME:-$HOME/.local/bin}`. Installation refuses
@@ -62,7 +62,7 @@ to replace regular files or unrelated symlinks.
 ## Files
 
 - Config: `${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/config`
-- Profile manifests: `${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/images/PROFILE.manifest`
+- Profile manifests: `${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/profiles/PROFILE.profile`
 - Generated Containerfiles: `${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/dockerfiles/Containerfile.pi-sandbox[.PROFILE]`
 - Containerfile template: `templates/Containerfile.pi-sandbox.template`
-- Profile manifest preamble template: `templates/profile.manifest.template`
+- Profile manifest preamble template: `templates/profile.template`

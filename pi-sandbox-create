@@ -9,21 +9,21 @@ HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-create.md"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
 CONFIG_FILE="${CONFIG_DIR}/config"
-PROFILE_DIR="${CONFIG_DIR}/images"
+PROFILES_DIR="${CONFIG_DIR}/profiles"
 CONTAINERFILE_DIR="${CONFIG_DIR}/dockerfiles"
 CONTAINERFILE_TEMPLATE="${SCRIPT_DIR}/templates/Containerfile.pi-sandbox.template"
-PROFILE_MANIFEST_TEMPLATE="${SCRIPT_DIR}/templates/profile.manifest.template"
+PROFILE_MANIFEST_TEMPLATE="${SCRIPT_DIR}/templates/profile.template"
 
 IMAGE="pi-sandbox:latest"
 BASE_IMAGE="node:24-bookworm-slim"
-PI_VERSION="0.83.0"
+PI_VERSION="0.84.2"
 CONTAINER_USER="pi"
 CONTAINER_UID=1000
 CONTAINER_GID=1000
 VERBOSE=0
 
 PROFILE=""
-MANIFEST_FILE=""
+PROFILE_FILE=""
 CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox"
 CREATE_PROFILE=0
 BUILD=0
@@ -68,7 +68,6 @@ PI_VERSION=${PI_VERSION}
 CONTAINER_USER=${CONTAINER_USER}
 CONTAINER_UID=${CONTAINER_UID}
 CONTAINER_GID=${CONTAINER_GID}
-PROFILE_DIR=${PROFILE_DIR}
 EOF
 }
 
@@ -89,9 +88,9 @@ load_config() {
             CONTAINER_USER) CONTAINER_USER="$value" ;;
             CONTAINER_UID) CONTAINER_UID="$value" ;;
             CONTAINER_GID) CONTAINER_GID="$value" ;;
-            PROFILE_DIR) PROFILE_DIR="$value" ;;
+            PROFILE_DIR) : ;; # legacy setting; manifests always use the XDG profiles directory
             VERBOSE) [[ "$value" =~ ^(1|true|yes)$ ]] && VERBOSE=1 ;;
-            CONTAINER_HOME|WORKSPACE|STATE_VOLUME|AGENT_VOLUME|MEMORY|CPUS|PIDS_LIMIT|ENV_FILE|NETWORK_MODE|MOUNT) : ;; # runner settings
+            CONTAINER_HOME|STATE_VOLUME|AGENT_VOLUME|MEMORY|CPUS|PIDS_LIMIT|ENV_FILE|NETWORK_MODE|MOUNT) : ;; # runner settings
             *) err "$CONFIG_FILE:$lineno: unsupported config key '$key'"; exit 2 ;;
         esac
     done < "$CONFIG_FILE"
@@ -102,13 +101,13 @@ validate_profile_name() {
 }
 
 write_manifest() {
-    MANIFEST_FILE="${PROFILE_DIR}/${PROFILE}.manifest"
+    PROFILE_FILE="${PROFILES_DIR}/${PROFILE}.profile"
     if (( DRY_RUN )); then
-        echo "+ write manifest $(printf '%q' "$MANIFEST_FILE") with preamble $(printf '%q' "$PROFILE_MANIFEST_TEMPLATE")"
+        echo "+ write manifest $(printf '%q' "$PROFILE_FILE") with preamble $(printf '%q' "$PROFILE_MANIFEST_TEMPLATE")"
         return 0
     fi
     [[ -r "$PROFILE_MANIFEST_TEMPLATE" ]] || { err "profile manifest template not found: $PROFILE_MANIFEST_TEMPLATE"; exit 1; }
-    mkdir -p -- "$PROFILE_DIR"
+    mkdir -p -- "$PROFILES_DIR"
     {
         cat "$PROFILE_MANIFEST_TEMPLATE"
         echo
@@ -122,14 +121,14 @@ write_manifest() {
         for spec in "${MANIFEST_ENVS[@]}"; do echo "ENV=${spec}"; done
         for spec in "${MANIFEST_PATHS[@]}"; do echo "PATH=${spec}"; done
         for spec in "${MANIFEST_APT[@]}"; do echo "APT=${spec}"; done
-    } > "$MANIFEST_FILE"
-    log "Wrote manifest $MANIFEST_FILE"
+    } > "$PROFILE_FILE"
+    log "Wrote manifest $PROFILE_FILE"
 }
 
 load_manifest() {
     [[ -n "$PROFILE" ]] || return 0
-    MANIFEST_FILE="${PROFILE_DIR}/${PROFILE}.manifest"
-    [[ -f "$MANIFEST_FILE" ]] || { err "profile '$PROFILE' does not exist ($MANIFEST_FILE)"; exit 1; }
+    PROFILE_FILE="${PROFILES_DIR}/${PROFILE}.profile"
+    [[ -f "$PROFILE_FILE" ]] || { err "profile '$PROFILE' does not exist ($PROFILE_FILE)"; exit 1; }
     TOOL_SPECS=(); EXTENSION_SPECS=(); MANIFEST_ENVS=(); MANIFEST_PATHS=(); MANIFEST_APT=()
     local line key value
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -144,9 +143,9 @@ load_manifest() {
             ENV) MANIFEST_ENVS+=("$value") ;;
             PATH) MANIFEST_PATHS+=("$value") ;;
             APT) MANIFEST_APT+=("$value") ;;
-            *) err "$MANIFEST_FILE: unsupported key '$key'"; exit 2 ;;
+            *) err "$PROFILE_FILE: unsupported key '$key'"; exit 2 ;;
         esac
-    done < "$MANIFEST_FILE"
+    done < "$PROFILE_FILE"
     IMAGE="pi-sandbox-${PROFILE}:latest"
     CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox.${PROFILE}"
 }
@@ -292,6 +291,10 @@ confirm() { (( YES )) && return 0; [[ -t 0 ]] || { err "$1 requires confirmation
 if [[ ${1:-} == "--install" || ${1:-} == "--remove" ]]; then
     exec "${SCRIPT_DIR}/pi-sandbox-run" "$@"
 fi
+if [[ $# -eq 1 && ( ${1:-} == "--help" || ${1:-} == "-h" ) ]]; then
+    usage
+    exit 0
+fi
 
 # Find --config before loading configuration so CLI can select another file.
 args=("$@")
@@ -357,7 +360,7 @@ fi
 if (( SHOW_INFO )); then
     echo "pi-sandbox build configuration"
     printf '  profile:       %s\n' "${PROFILE:-default}"
-    printf '  manifest:      %s\n' "${MANIFEST_FILE:-none}"
+    printf '  manifest:      %s\n' "${PROFILE_FILE:-none}"
     printf '  image:         %s\n' "$IMAGE"
     printf '  containerfile: %s\n' "$CONTAINERFILE"
     printf '  template:      %s\n' "$CONTAINERFILE_TEMPLATE"

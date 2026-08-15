@@ -10,13 +10,14 @@ XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 XDG_BIN_HOME="${XDG_BIN_HOME:-${HOME}/.local/bin}"
 CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
 CONFIG_FILE="${CONFIG_DIR}/config"
+ALLOWED_ROOTS_FILE="${CONFIG_DIR}/allowed-roots"
 
 IMAGE="pi-sandbox:latest"
 CONTAINER_USER="pi"
 CONTAINER_UID=1000
 CONTAINER_GID=1000
 CONTAINER_HOME="/home/pi"
-WORKSPACE="/home/pi/workspace"
+CONTAINER_START_DIR=""
 AGENT_VOLUME="pi-agent"
 MEMORY=""
 CPUS=""
@@ -36,6 +37,7 @@ RESET_STATE=0
 YES=0
 STATE_VOLUME_SET=0
 EXTRA_MOUNTS=()
+ALLOWED_ROOTS=()
 PI_ARGS=()
 
 usage() {
@@ -69,7 +71,6 @@ CONTAINER_USER=${CONTAINER_USER}
 CONTAINER_UID=${CONTAINER_UID}
 CONTAINER_GID=${CONTAINER_GID}
 CONTAINER_HOME=${CONTAINER_HOME}
-WORKSPACE=${WORKSPACE}
 STATE_VOLUME=${AGENT_VOLUME}
 MEMORY=${MEMORY}
 CPUS=${CPUS}
@@ -79,6 +80,75 @@ NETWORK_MODE=${NETWORK_MODE}
 VERBOSE=${VERBOSE}
 # MOUNT=/host/path:/container/path:ro
 EOF
+}
+
+write_default_allowed_roots() {
+    local default_root="${HOME}/src"
+
+    mkdir -p -- "$(dirname -- "$ALLOWED_ROOTS_FILE")"
+    if [[ ! -e "$default_root" ]]; then
+        mkdir -p -- "$default_root"
+    fi
+    [[ -d "$default_root" && ! -L "$default_root" ]] || {
+        err "default allowed root must be a non-symlinked directory: $default_root"
+        exit 1
+    }
+    cat > "$ALLOWED_ROOTS_FILE" <<'EOF'
+# pi-sandbox allowed bind-mount roots
+# One directory path relative to $HOME per line. Edit this file by hand.
+# The listed roots must exist and must not contain hidden, '.', '..', or
+# symbolic-link path components. A mounted directory must be below a root;
+# the root directory itself cannot be mounted.
+src
+EOF
+}
+
+load_allowed_roots() {
+    [[ -f "$ALLOWED_ROOTS_FILE" ]] || write_default_allowed_roots
+
+    local line entry candidate canonical home_canonical component existing lineno=0 duplicate
+    local -a components
+    home_canonical="$(realpath -e -- "$HOME")" || { err "cannot resolve HOME: $HOME"; exit 1; }
+    [[ -d "$home_canonical" ]] || { err "HOME is not a directory: $HOME"; exit 1; }
+    ALLOWED_ROOTS=()
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((++lineno))
+        entry="$(trim "$line")"
+        [[ -z "$entry" || "$entry" == \#* ]] && continue
+        [[ "$entry" != /* ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: entry must be relative to HOME: $entry"; exit 2; }
+        while [[ "$entry" == */ ]]; do entry="${entry%/}"; done
+        [[ -n "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: empty root is not allowed"; exit 2; }
+        [[ "$entry" != *"//"* ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: empty path component: $entry"; exit 2; }
+
+        IFS='/' read -r -a components <<< "$entry"
+        for component in "${components[@]}"; do
+            [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || {
+                err "$ALLOWED_ROOTS_FILE:$lineno: path traversal is not allowed: $entry"
+                exit 2
+            }
+            [[ "$component" != .* ]] || {
+                err "$ALLOWED_ROOTS_FILE:$lineno: hidden directory is not allowed: $entry"
+                exit 2
+            }
+        done
+
+        candidate="${home_canonical}/${entry}"
+        [[ -e "$candidate" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: directory does not exist: $candidate"; exit 2; }
+        [[ -d "$candidate" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: entry is not a directory: $candidate"; exit 2; }
+        [[ ! -L "$candidate" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: symbolic link is not allowed: $candidate"; exit 2; }
+        canonical="$(realpath -e -- "$candidate")" || { err "$ALLOWED_ROOTS_FILE:$lineno: cannot resolve: $candidate"; exit 2; }
+        [[ "$canonical" == "$candidate" && "$canonical" == "$home_canonical/"* ]] || {
+            err "$ALLOWED_ROOTS_FILE:$lineno: entry escapes HOME or contains a symbolic link: $entry"
+            exit 2
+        }
+
+        duplicate=0
+        for existing in "${ALLOWED_ROOTS[@]}"; do
+            if [[ "$existing" == "$canonical" ]]; then duplicate=1; fi
+        done
+        if (( ! duplicate )); then ALLOWED_ROOTS+=("$canonical"); fi
+    done < "$ALLOWED_ROOTS_FILE"
 }
 
 load_config() {
@@ -98,7 +168,6 @@ load_config() {
             CONTAINER_UID) CONTAINER_UID="$value" ;;
             CONTAINER_GID) CONTAINER_GID="$value" ;;
             CONTAINER_HOME) CONTAINER_HOME="$value" ;;
-            WORKSPACE) WORKSPACE="$value" ;;
             STATE_VOLUME|AGENT_VOLUME) AGENT_VOLUME="$value" ;;
             MEMORY) MEMORY="$value" ;;
             CPUS) CPUS="$value" ;;
@@ -136,7 +205,7 @@ resolve_link_target() {
 
 install_user_links() {
     local name target destination existing
-    local -a names=(pi-sandbox pi-sandbox-create pi-sandbox-run)
+    local -a names=(pi-sandbox-create pi-sandbox-run)
 
     [[ "$XDG_BIN_HOME" == /* ]] || { err "XDG_BIN_HOME must be an absolute path: $XDG_BIN_HOME"; return 1; }
 
@@ -174,7 +243,7 @@ install_user_links() {
 
 remove_user_links() {
     local name target destination existing
-    local -a names=(pi-sandbox pi-sandbox-create pi-sandbox-run)
+    local -a names=(pi-sandbox-create pi-sandbox-run)
 
     [[ "$XDG_BIN_HOME" == /* ]] || { err "XDG_BIN_HOME must be an absolute path: $XDG_BIN_HOME"; return 1; }
 
@@ -206,7 +275,7 @@ VALIDATED_PATH=""
 # its path. Contents below that directory are deliberately not inspected; they
 # may contain hidden entries, files, or symbolic links.
 validate_host_directory() {
-    local source="$1" description="$2" root relative component canonical
+    local source="$1" description="$2" root relative component canonical home_canonical allowed_roots_display
     local -a components
 
     if [[ "$source" == ./* ]]; then
@@ -233,19 +302,29 @@ validate_host_directory() {
         err "$description must not contain symbolic links, '.' or '..': $source"
         return 1
     }
+    home_canonical="$(realpath -e -- "$HOME")" || { err "cannot resolve HOME: $HOME"; return 1; }
+    [[ "$canonical" != "$home_canonical" ]] || {
+        err "$description cannot be the whole HOME directory: $canonical"
+        return 1
+    }
 
     relative=""
-    for root in "${HOME}/SAPDevelop" "${HOME}/src"; do
-        root="${root%/}"
+    for root in "${ALLOWED_ROOTS[@]}"; do
         if [[ "$canonical" == "$root/"* ]]; then
             relative="${canonical#"$root/"}"
             break
         fi
     done
-    [[ -n "$relative" ]] || {
-        err "$description must be a subdirectory of '${HOME}/SAPDevelop' or '${HOME}/src': $canonical"
+    if [[ -z "$relative" ]]; then
+        if ((${#ALLOWED_ROOTS[@]})); then
+            allowed_roots_display="$(printf '%s, ' "${ALLOWED_ROOTS[@]}")"
+            allowed_roots_display="${allowed_roots_display%, }"
+        else
+            allowed_roots_display="none configured"
+        fi
+        err "$description must be below an allowed root ($allowed_roots_display): $canonical"
         return 1
-    }
+    fi
 
     IFS='/' read -r -a components <<< "$relative"
     for component in "${components[@]}"; do
@@ -285,6 +364,17 @@ validate_container_mountpoint() {
     done
 }
 
+resolve_workspace() {
+    local workspace_name
+
+    HOST_WORKSPACE="${HOST_WORKSPACE:-$PWD}"
+    validate_host_directory "$HOST_WORKSPACE" "workspace" || return 1
+    HOST_WORKSPACE="$VALIDATED_PATH"
+    workspace_name="${HOST_WORKSPACE##*/}"
+    CONTAINER_START_DIR="${CONTAINER_HOME%/}/${workspace_name}"
+    validate_container_mountpoint "$CONTAINER_START_DIR" || return 1
+}
+
 validate_mount_spec() {
     local spec="$1" source remainder target options=""
 
@@ -312,6 +402,10 @@ if [[ ${1:-} == "--install" || ${1:-} == "--remove" ]]; then
     if [[ "$1" == "--install" ]]; then install_user_links; else remove_user_links; fi
     exit $?
 fi
+if [[ $# -eq 1 && ( ${1:-} == "--help" || ${1:-} == "-h" ) ]]; then
+    usage
+    exit 0
+fi
 
 # Find --config before loading configuration so CLI can select another file.
 args=("$@")
@@ -319,10 +413,12 @@ for ((i=0; i<${#args[@]}; i++)); do
     if [[ "${args[i]}" == "--config" ]]; then
         (( i + 1 < ${#args[@]} )) || { err "--config requires FILE"; exit 2; }
         CONFIG_FILE="${args[i+1]}"
+        ALLOWED_ROOTS_FILE="$(dirname -- "$CONFIG_FILE")/allowed-roots"
     fi
 done
 
 load_config
+load_allowed_roots
 
 if [[ $# -gt 0 && "$1" != -* ]]; then
     PROFILE="$1"
@@ -334,7 +430,6 @@ while [[ $# -gt 0 ]]; do
         --) shift; PI_ARGS+=("$@"); break ;;
         --name) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; INSTANCE_NAME="$2"; shift ;;
         --workspace) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; HOST_WORKSPACE="$2"; shift ;;
-        --container-workspace) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; WORKSPACE="$2"; shift ;;
         --mount) [[ $# -ge 2 ]] || { err "$1 requires SPEC"; exit 2; }; EXTRA_MOUNTS+=("$2"); shift ;;
         --env-file) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; ENV_FILE="$2"; shift ;;
         --state-volume) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; AGENT_VOLUME="$2"; STATE_VOLUME_SET=1; shift ;;
@@ -368,8 +463,6 @@ done
 [[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "container UID must be numeric"; exit 2; }
 [[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "container GID must be numeric"; exit 2; }
 [[ "$PIDS_LIMIT" =~ ^[0-9]+$ ]] || { err "pids limit must be numeric"; exit 2; }
-[[ "$WORKSPACE" == /* ]] || { err "container workspace must be an absolute path"; exit 2; }
-validate_container_mountpoint "$WORKSPACE" || exit 2
 [[ "$CONTAINER_HOME" == /* ]] || { err "container home must be an absolute path"; exit 2; }
 
 if [[ -n "$PROFILE" ]]; then
@@ -382,15 +475,18 @@ fi
 require_podman
 
 if (( SHOW_INFO )); then
+    resolve_workspace || exit 2
     echo "pi-sandbox runtime configuration"
     printf '  profile:             %s\n' "${PROFILE:-default}"
     printf '  image:               %s\n' "$IMAGE"
     printf '  container user:      %s (%s:%s)\n' "$CONTAINER_USER" "$CONTAINER_UID" "$CONTAINER_GID"
-    printf '  container workspace: %s\n' "$WORKSPACE"
-    printf '  host workspace:      %s\n' "${HOST_WORKSPACE:-$PWD}"
+    printf '  container start dir: %s\n' "$CONTAINER_START_DIR"
+    printf '  host start dir:      %s\n' "${HOST_WORKSPACE:-$PWD}"
     printf '  state volume:        %s\n' "$AGENT_VOLUME"
     printf '  network:             %s\n' "$NETWORK_MODE"
     printf '  extra mounts:        %s\n' "${EXTRA_MOUNTS[*]:-none}"
+    printf '  allowed-roots file:  %s\n' "$ALLOWED_ROOTS_FILE"
+    printf '  allowed roots:       %s\n' "${ALLOWED_ROOTS[*]:-none}"
     if command -v podman >/dev/null 2>&1 && podman image exists "$IMAGE" 2>/dev/null; then
         printf '  image status:        present\n'
     else
@@ -425,9 +521,7 @@ elif ! podman image exists "$IMAGE"; then
     exit 1
 fi
 
-HOST_WORKSPACE="${HOST_WORKSPACE:-$PWD}"
-validate_host_directory "$HOST_WORKSPACE" "workspace" || exit 2
-HOST_WORKSPACE="$VALIDATED_PATH"
+resolve_workspace || exit 2
 
 VALIDATED_MOUNTS=()
 for mount in "${EXTRA_MOUNTS[@]}"; do
@@ -455,9 +549,9 @@ RUN_ARGS=(
     --env "XDG_CACHE_HOME=${CONTAINER_HOME}/.cache"
     --env "XDG_STATE_HOME=${CONTAINER_HOME}/.local/state"
     --env "XDG_BIN_HOME=${CONTAINER_HOME}/.local/bin"
-    --volume "${HOST_WORKSPACE}:${WORKSPACE}:rw"
+    --volume "${HOST_WORKSPACE}:${CONTAINER_START_DIR}:rw"
     --volume "${AGENT_VOLUME}:${CONTAINER_HOME}/.pi/agent:rw"
-    --workdir "$WORKSPACE"
+    --workdir "$CONTAINER_START_DIR"
 )
 
 [[ -n "$MEMORY" ]] && RUN_ARGS+=(--memory "$MEMORY")
@@ -479,7 +573,7 @@ done
 
 log "Starting Pi sandbox"
 echo "    image:     $IMAGE"
-echo "    workspace: $HOST_WORKSPACE -> $WORKSPACE"
+echo "    start dir:  $HOST_WORKSPACE -> $CONTAINER_START_DIR"
 echo "    state:     $AGENT_VOLUME"
 echo "    network:   $NETWORK_MODE"
 

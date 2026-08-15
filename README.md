@@ -20,20 +20,18 @@ The project is split into two roles:
 | --- | --- |
 | `pi-sandbox-create` | Admin command for creating profile manifests, generating Containerfiles, and building/removing images. |
 | `pi-sandbox-run` | Standard-user command for running existing sandbox images. It never builds missing images. |
-| `pi-sandbox` | Runtime-only alias for `pi-sandbox-run`. It never dispatches to admin/build functionality. |
 
 ## User-local installation
 
-Create symlinks for all commands in the XDG user binary directory:
+Create symlinks for both commands in the XDG user binary directory:
 
 ```bash
-./pi-sandbox --install
+./pi-sandbox-run --install
 ```
 
 This installs:
 
 ```text
-${XDG_BIN_HOME:-$HOME/.local/bin}/pi-sandbox
 ${XDG_BIN_HOME:-$HOME/.local/bin}/pi-sandbox-run
 ${XDG_BIN_HOME:-$HOME/.local/bin}/pi-sandbox-create
 ```
@@ -44,10 +42,10 @@ files or unrelated symlinks.
 Remove the installed symlinks with:
 
 ```bash
-pi-sandbox --remove
+pi-sandbox-run --remove
 ```
 
-The same `--install` and `--remove` options are accepted by all three commands.
+The same `--install` and `--remove` options are accepted by both commands.
 
 ## Quick start
 
@@ -67,12 +65,6 @@ pi-sandbox-rust:latest
 
 ```bash
 ./pi-sandbox-run rust
-```
-
-or via the runtime alias:
-
-```bash
-./pi-sandbox rust
 ```
 
 ### Run with extra mounts
@@ -146,24 +138,47 @@ Use a named state instance:
 ./pi-sandbox-run rust --name backend
 ```
 
-Use a different host workspace:
+Use a different host starting directory:
 
 ```bash
-./pi-sandbox-run rust --workspace ~/SAPDevelop/projects/backend
+./pi-sandbox-run rust --workspace ~/src/projects/backend
 ```
 
-Workspace and extra-mount sources must be existing, non-symlinked directories
-strictly below `$HOME/SAPDevelop` or `$HOME/src`. They may be nested at any
-depth and do not need to be direct children. Sources may be absolute or start
-with `./`; `./` paths are expanded against the current directory before
-validation. Other relative paths are rejected. Files, the approved roots
-themselves, hidden directory components, `.`/`..` traversal, and paths outside
-those roots are rejected.
+The directory keeps its basename inside the container. In this example it is
+mounted at `/home/pi/backend`, and Pi starts there. The current directory uses
+the same rule when `--workspace` is omitted; no generic `/home/pi/workspace`
+runtime mount is used.
+
+Starting-directory and extra-mount sources are validated identically. They must
+be existing, non-symlinked directories strictly below a configured allowed
+root. They may be nested at any depth and do not need to be direct children.
+Sources may be absolute or start with `./`; `./` paths are expanded against the
+current directory before validation. Other relative paths are rejected. Files,
+the approved roots themselves, the whole `$HOME` directory, hidden directory
+components, `.`/`..` traversal, and paths outside configured roots are rejected.
 
 Only the selected source directory and its path are validated. Its contents are
 not scanned and may include hidden files/directories, regular files, and
 symbolic links. Extra mount destinations must be absolute and cannot be `/`,
 hidden, or contain traversal components. Mount mode is limited to `ro` or `rw`.
+
+Allowed roots are configured one per line, relative to `$HOME`, in:
+
+```text
+${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/allowed-roots
+```
+
+The file is created automatically with `src` as its default entry and can be
+edited by hand. `$HOME/src` is created if it does not already exist. Entries
+must be existing directories below `$HOME`; absolute
+paths, hidden components, `.`/`..`, empty components, symlinks, and paths that
+resolve outside `$HOME` are rejected. For example:
+
+```text
+src
+projects/team-a
+work/customer-a
+```
 
 Run with no network:
 
@@ -205,13 +220,14 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/dockerfiles/
 Profile manifests are written to:
 
 ```text
-${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/images/
+${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/profiles/
 ```
 
-The default config file is:
+The default config and allowed-roots files are:
 
 ```text
 ${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/config
+${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/allowed-roots
 ```
 
 ## Templates and docs
@@ -225,7 +241,7 @@ templates/Containerfile.pi-sandbox.template
 New profile manifests include the explanatory preamble from:
 
 ```text
-templates/profile.manifest.template
+templates/profile.template
 ```
 
 Help text is externalized as Markdown:
@@ -233,7 +249,6 @@ Help text is externalized as Markdown:
 ```text
 docs/pi-sandbox-run.md
 docs/pi-sandbox-create.md
-docs/pi-sandbox.md
 ```
 
 `-h` and `--help` print the corresponding Markdown file.
@@ -243,7 +258,7 @@ docs/pi-sandbox.md
 Run basic syntax checks:
 
 ```bash
-bash -n pi-sandbox pi-sandbox-run pi-sandbox-create
+bash -n pi-sandbox-run pi-sandbox-create
 ```
 
 Verify help output is sourced from Markdown files:
@@ -252,3 +267,12 @@ Verify help output is sourced from Markdown files:
 cmp -s <(./pi-sandbox-run --help) docs/pi-sandbox-run.md
 cmp -s <(./pi-sandbox-create --help) docs/pi-sandbox-create.md
 ```
+
+## Author
+
+Michal Tomeczek <mtomeczek74@gmail.com>
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for the
+full license text.
