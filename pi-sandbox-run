@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# pi-sandbox-run: run an existing Pi sandbox image. It never builds images.
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-run.md"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
+CONFIG_FILE="${CONFIG_DIR}/config"
+
+IMAGE="pi-sandbox:latest"
+CONTAINER_USER="pi"
+CONTAINER_UID=1000
+CONTAINER_GID=1000
+CONTAINER_HOME="/home/pi"
+WORKSPACE="/home/pi/workspace"
+AGENT_VOLUME="pi-agent"
+MEMORY=""
+CPUS=""
+PIDS_LIMIT=512
+ENV_FILE=""
+NETWORK_MODE="default"
+VERBOSE=0
+
+PROFILE=""
+INSTANCE_NAME=""
+HOST_WORKSPACE=""
+SHELL_MODE=0
+DRY_RUN=0
+SHOW_INFO=0
+SHOW_STATE=0
+RESET_STATE=0
+YES=0
+STATE_VOLUME_SET=0
+EXTRA_MOUNTS=()
+PI_ARGS=()
+
+usage() {
+    if [[ -r "$HELP_FILE" ]]; then
+        cat "$HELP_FILE"
+    else
+        printf 'error: help file not found: %s\n' "$HELP_FILE" >&2
+        return 1
+    fi
+}
+
+err() { printf 'error: %s\n' "$*" >&2; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+log() { printf '==> %s\n' "$*"; }
+
+shell_join() { local out="" q arg; for arg in "$@"; do printf -v q '%q' "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "$out"; }
+run_cmd() { if (( VERBOSE || DRY_RUN )); then printf '+ '; shell_join "$@"; fi; (( DRY_RUN )) && return 0; "$@"; }
+
+trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+write_default_config() {
+    mkdir -p -- "$(dirname -- "$CONFIG_FILE")"
+    cat > "$CONFIG_FILE" <<EOF
+# pi-sandbox runtime configuration
+CONTAINER_USER=${CONTAINER_USER}
+CONTAINER_UID=${CONTAINER_UID}
+CONTAINER_GID=${CONTAINER_GID}
+CONTAINER_HOME=${CONTAINER_HOME}
+WORKSPACE=${WORKSPACE}
+STATE_VOLUME=${AGENT_VOLUME}
+MEMORY=${MEMORY}
+CPUS=${CPUS}
+PIDS_LIMIT=${PIDS_LIMIT}
+ENV_FILE=${ENV_FILE}
+NETWORK_MODE=${NETWORK_MODE}
+VERBOSE=${VERBOSE}
+# MOUNT=/host/path:/container/path:ro
+EOF
+}
+
+load_config() {
+    [[ -f "$CONFIG_FILE" ]] || { write_default_config; return 0; }
+    local line key value lineno=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((++lineno))
+        line="$(trim "$line")"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == *=* ]] || { err "$CONFIG_FILE:$lineno: expected KEY=VALUE"; exit 2; }
+        key="$(trim "${line%%=*}")"; value="$(trim "${line#*=}")"
+        if [[ "$value" == \"*\" && "$value" == *\" ]]; then value="${value:1:${#value}-2}"; fi
+        if [[ "$value" == \'*\' && "$value" == *\' ]]; then value="${value:1:${#value}-2}"; fi
+        case "$key" in
+            IMAGE) IMAGE="$value" ;;
+            CONTAINER_USER) CONTAINER_USER="$value" ;;
+            CONTAINER_UID) CONTAINER_UID="$value" ;;
+            CONTAINER_GID) CONTAINER_GID="$value" ;;
+            CONTAINER_HOME) CONTAINER_HOME="$value" ;;
+            WORKSPACE) WORKSPACE="$value" ;;
+            STATE_VOLUME|AGENT_VOLUME) AGENT_VOLUME="$value" ;;
+            MEMORY) MEMORY="$value" ;;
+            CPUS) CPUS="$value" ;;
+            PIDS_LIMIT) PIDS_LIMIT="$value" ;;
+            ENV_FILE) ENV_FILE="$value" ;;
+            NETWORK_MODE) NETWORK_MODE="$value" ;;
+            MOUNT) EXTRA_MOUNTS+=("$value") ;;
+            VERBOSE) [[ "$value" =~ ^(1|true|yes)$ ]] && VERBOSE=1 ;;
+            BASE_IMAGE|PI_VERSION|PROFILE_DIR) : ;; # creator settings; ignored by runner
+            *) err "$CONFIG_FILE:$lineno: unsupported config key '$key'"; exit 2 ;;
+        esac
+    done < "$CONFIG_FILE"
+}
+
+require_podman() {
+    command -v podman >/dev/null 2>&1 || { err "podman is not installed or not in PATH"; exit 1; }
+    (( DRY_RUN )) && return 0
+    podman info >/dev/null 2>&1 || { err "Podman is installed but 'podman info' failed"; exit 1; }
+}
+
+confirm() {
+    (( YES )) && return 0
+    [[ -t 0 ]] || { err "$1 requires confirmation; rerun with --yes"; return 1; }
+    local answer
+    read -r -p "$1 [y/N] " answer
+    [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+# Find --config before loading configuration so CLI can select another file.
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+    if [[ "${args[i]}" == "--config" ]]; then
+        (( i + 1 < ${#args[@]} )) || { err "--config requires FILE"; exit 2; }
+        CONFIG_FILE="${args[i+1]}"
+    fi
+done
+
+load_config
+
+if [[ $# -gt 0 && "$1" != -* ]]; then
+    PROFILE="$1"
+    shift
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --) shift; PI_ARGS+=("$@"); break ;;
+        --name) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; INSTANCE_NAME="$2"; shift ;;
+        --workspace) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; HOST_WORKSPACE="$2"; shift ;;
+        --container-workspace) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; WORKSPACE="$2"; shift ;;
+        --mount) [[ $# -ge 2 ]] || { err "$1 requires SPEC"; exit 2; }; EXTRA_MOUNTS+=("$2"); shift ;;
+        --env-file) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; ENV_FILE="$2"; shift ;;
+        --state-volume) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; AGENT_VOLUME="$2"; STATE_VOLUME_SET=1; shift ;;
+        --memory) [[ $# -ge 2 ]] || { err "$1 requires SIZE"; exit 2; }; MEMORY="$2"; shift ;;
+        --cpus) [[ $# -ge 2 ]] || { err "$1 requires NUMBER"; exit 2; }; CPUS="$2"; shift ;;
+        --pids-limit) [[ $# -ge 2 ]] || { err "$1 requires NUMBER"; exit 2; }; PIDS_LIMIT="$2"; shift ;;
+        --no-network) NETWORK_MODE="none" ;;
+        --shell) SHELL_MODE=1 ;;
+        --image) [[ $# -ge 2 ]] || { err "$1 requires IMAGE"; exit 2; }; IMAGE="$2"; PROFILE=""; shift ;;
+        --show-state) SHOW_STATE=1 ;;
+        --reset-state) RESET_STATE=1 ;;
+        --info) SHOW_INFO=1 ;;
+        --dry-run) DRY_RUN=1 ;;
+        --verbose|--debug) VERBOSE=1 ;;
+        --yes|-y) YES=1 ;;
+        --config) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; CONFIG_FILE="$2"; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *)
+            if [[ "$1" != -* && -z "$PROFILE" ]]; then
+                PROFILE="$1"
+            else
+                err "unknown option: $1"; usage >&2; exit 2
+            fi
+            ;;
+    esac
+    shift
+done
+
+[[ -z "$PROFILE" || "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "invalid profile name '$PROFILE'"; exit 2; }
+[[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "invalid sandbox name '$INSTANCE_NAME'"; exit 2; }
+[[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "container UID must be numeric"; exit 2; }
+[[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "container GID must be numeric"; exit 2; }
+[[ "$PIDS_LIMIT" =~ ^[0-9]+$ ]] || { err "pids limit must be numeric"; exit 2; }
+[[ "$WORKSPACE" == /* ]] || { err "container workspace must be an absolute path"; exit 2; }
+[[ "$CONTAINER_HOME" == /* ]] || { err "container home must be an absolute path"; exit 2; }
+
+if [[ -n "$PROFILE" ]]; then
+    IMAGE="pi-sandbox-${PROFILE}:latest"
+    (( STATE_VOLUME_SET )) || AGENT_VOLUME="pi-agent-${PROFILE}${INSTANCE_NAME:+-${INSTANCE_NAME}}"
+elif [[ "$AGENT_VOLUME" == "pi-agent" && -n "$INSTANCE_NAME" && $STATE_VOLUME_SET -eq 0 ]]; then
+    AGENT_VOLUME="pi-agent-${INSTANCE_NAME}"
+fi
+
+require_podman
+
+if (( SHOW_INFO )); then
+    echo "pi-sandbox runtime configuration"
+    printf '  profile:             %s\n' "${PROFILE:-default}"
+    printf '  image:               %s\n' "$IMAGE"
+    printf '  container user:      %s (%s:%s)\n' "$CONTAINER_USER" "$CONTAINER_UID" "$CONTAINER_GID"
+    printf '  container workspace: %s\n' "$WORKSPACE"
+    printf '  host workspace:      %s\n' "${HOST_WORKSPACE:-$PWD}"
+    printf '  state volume:        %s\n' "$AGENT_VOLUME"
+    printf '  network:             %s\n' "$NETWORK_MODE"
+    printf '  extra mounts:        %s\n' "${EXTRA_MOUNTS[*]:-none}"
+    if command -v podman >/dev/null 2>&1 && podman image exists "$IMAGE" 2>/dev/null; then
+        printf '  image status:        present\n'
+    else
+        printf '  image status:        missing\n'
+    fi
+    exit 0
+fi
+
+if (( SHOW_STATE )); then
+    if (( DRY_RUN )); then echo "+ podman volume inspect $(printf '%q' "$AGENT_VOLUME")"; exit 0; fi
+    if podman volume exists "$AGENT_VOLUME"; then podman volume inspect "$AGENT_VOLUME"; else echo "State volume '$AGENT_VOLUME' does not exist."; fi
+    exit 0
+fi
+
+if (( RESET_STATE )); then
+    if (( DRY_RUN )); then echo "+ podman volume rm $(printf '%q' "$AGENT_VOLUME")"; exit 0; fi
+    if podman volume exists "$AGENT_VOLUME"; then
+        confirm "Remove Pi state volume '$AGENT_VOLUME'? This deletes saved state." || exit 1
+        run_cmd podman volume rm "$AGENT_VOLUME" >/dev/null
+        echo "Removed state volume '$AGENT_VOLUME'."
+    else
+        echo "State volume '$AGENT_VOLUME' does not exist."
+    fi
+    exit 0
+fi
+
+if (( DRY_RUN )); then
+    echo "# Require existing image: $IMAGE"
+elif ! podman image exists "$IMAGE"; then
+    err "sandbox image '$IMAGE' does not exist"
+    err "ask an administrator to create it with: pi-sandbox-create${PROFILE:+ $PROFILE} --build"
+    exit 1
+fi
+
+if (( ! DRY_RUN )) && ! podman volume exists "$AGENT_VOLUME"; then
+    log "Creating Pi state volume: $AGENT_VOLUME"
+    run_cmd podman volume create "$AGENT_VOLUME" >/dev/null
+elif (( DRY_RUN )); then
+    echo "# Ensure state volume exists: $AGENT_VOLUME"
+fi
+
+HOST_WORKSPACE="${HOST_WORKSPACE:-$PWD}"
+[[ -d "$HOST_WORKSPACE" ]] || { err "workspace does not exist: $HOST_WORKSPACE"; exit 2; }
+HOST_WORKSPACE="$(cd "$HOST_WORKSPACE" && pwd -P)"
+
+RUN_ARGS=(
+    --rm --interactive --tty
+    --userns="keep-id:uid=${CONTAINER_UID},gid=${CONTAINER_GID}"
+    --cap-drop=ALL
+    --security-opt=no-new-privileges
+    --pids-limit="$PIDS_LIMIT"
+    --env "HOME=${CONTAINER_HOME}"
+    --env "USER=${CONTAINER_USER}"
+    --env "XDG_CONFIG_HOME=${CONTAINER_HOME}/.config"
+    --env "XDG_DATA_HOME=${CONTAINER_HOME}/.local/share"
+    --env "XDG_CACHE_HOME=${CONTAINER_HOME}/.cache"
+    --env "XDG_STATE_HOME=${CONTAINER_HOME}/.local/state"
+    --env "XDG_BIN_HOME=${CONTAINER_HOME}/.local/bin"
+    --volume "${HOST_WORKSPACE}:${WORKSPACE}:rw"
+    --volume "${AGENT_VOLUME}:${CONTAINER_HOME}/.pi/agent:rw"
+    --workdir "$WORKSPACE"
+)
+
+[[ -n "$MEMORY" ]] && RUN_ARGS+=(--memory "$MEMORY")
+[[ -n "$CPUS" ]] && RUN_ARGS+=(--cpus "$CPUS")
+[[ "$NETWORK_MODE" == "none" ]] && RUN_ARGS+=(--network=none --env PI_OFFLINE=1)
+
+for mount in "${EXTRA_MOUNTS[@]}"; do
+    [[ "$mount" == *:* ]] || { err "invalid --mount '$mount'; expected HOST:CONTAINER[:OPTIONS]"; exit 2; }
+    RUN_ARGS+=(--volume "$mount")
+done
+
+if [[ -n "$ENV_FILE" ]]; then
+    [[ -r "$ENV_FILE" ]] || { err "environment file is not readable: $ENV_FILE"; exit 1; }
+    RUN_ARGS+=(--env-file "$ENV_FILE")
+fi
+
+for var in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; do
+    [[ -n "${!var:-}" ]] && RUN_ARGS+=(--env "$var")
+done
+
+log "Starting Pi sandbox"
+echo "    image:     $IMAGE"
+echo "    workspace: $HOST_WORKSPACE -> $WORKSPACE"
+echo "    state:     $AGENT_VOLUME"
+echo "    network:   $NETWORK_MODE"
+
+if (( SHELL_MODE )); then
+    run_cmd podman run "${RUN_ARGS[@]}" --entrypoint /bin/bash "$IMAGE"
+else
+    run_cmd podman run "${RUN_ARGS[@]}" "$IMAGE" "${PI_ARGS[@]}"
+fi

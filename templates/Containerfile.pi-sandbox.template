@@ -1,0 +1,49 @@
+ARG BASE_IMAGE=node:24-bookworm-slim
+FROM ${BASE_IMAGE} AS runtime
+ARG PI_VERSION
+ARG USER_NAME=pi
+ARG USER_UID=1000
+ARG USER_GID=1000
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash ca-certificates git curl jq ripgrep fd-find fzf less procps openssh-client unzip xz-utils tar \
+{{APT_PACKAGES}}
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+# PI_VERSION may be an exact version or an npm dist-tag such as "latest".
+# Install Pi directly in the final runtime stage so npm preserves its package layout.
+RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && npm cache clean --force \
+    && command -v pi \
+    && pi --version
+
+# Create the unprivileged runtime user before installing language/tool managers.
+RUN set -eux; \
+    existing_group="$(getent group "${USER_GID}" | cut -d: -f1 || true)"; \
+    if [ -z "$existing_group" ]; then groupadd --gid "${USER_GID}" "${USER_NAME}"; \
+    elif [ "$existing_group" != "${USER_NAME}" ]; then groupmod --new-name "${USER_NAME}" "$existing_group"; fi; \
+    existing_user="$(getent passwd "${USER_UID}" | cut -d: -f1 || true)"; \
+    if [ -n "$existing_user" ] && [ "$existing_user" != "${USER_NAME}" ]; then \
+      usermod --login "${USER_NAME}" --home "/home/${USER_NAME}" --move-home --gid "${USER_GID}" --shell /bin/bash "$existing_user"; \
+    elif [ -z "$existing_user" ]; then \
+      useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --home-dir "/home/${USER_NAME}" --shell /bin/bash "${USER_NAME}"; \
+    fi; \
+    mkdir -p "/home/${USER_NAME}/workspace" \
+             "/home/${USER_NAME}/.pi/agent" \
+             "/home/${USER_NAME}/.local/bin" \
+             "/home/${USER_NAME}/.local/share" \
+             "/home/${USER_NAME}/.config" \
+             "/home/${USER_NAME}/.cache"; \
+    chown -R "${USER_UID}:${USER_GID}" "/home/${USER_NAME}"
+
+ENV HOME=/home/${USER_NAME} \
+    XDG_CONFIG_HOME=/home/${USER_NAME}/.config \
+    XDG_DATA_HOME=/home/${USER_NAME}/.local/share \
+    XDG_CACHE_HOME=/home/${USER_NAME}/.cache \
+    XDG_STATE_HOME=/home/${USER_NAME}/.local/state \
+    XDG_BIN_HOME=/home/${USER_NAME}/.local/bin
+ENV PATH="/home/${USER_NAME}/.local/bin:${PATH}"
+USER ${USER_UID}:${USER_GID}
+{{DYNAMIC_SNIPPETS}}
+WORKDIR /home/${USER_NAME}/workspace
+ENTRYPOINT ["pi"]

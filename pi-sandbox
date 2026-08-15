@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Compatibility alias for standard-user runtime only.
+# Image/profile administration must use pi-sandbox-create explicitly.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec "${SCRIPT_DIR}/pi-sandbox-run" "$@"
