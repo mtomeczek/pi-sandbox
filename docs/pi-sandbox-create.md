@@ -24,6 +24,7 @@ pi-sandbox-create rust --regenerate-containerfile --no-cache
 - `--create PROFILE` — create or update a versioned profile manifest.
 - `--tool TOOL@VERSION` — add a tool; repeatable. Supported tools: `go`, `rust`, `jvm`, `uv`, `fnm`, `node`, `python`.
 - `--extension TYPE:SPEC` — add an extension; repeatable. Supported extensions: `rustup:COMPONENT`, `cargo:CRATE[@VERSION]`, `uv:PACKAGE[@VERSION]`.
+- `--npm PACKAGE[@VERSION]` — install a global npm command-line package; repeatable. Scoped packages such as `@angular/cli@20.3.9` are supported.
 - `--env NAME=VALUE` — add an environment variable to the manifest.
 - `--path DIRECTORY` — prepend a directory to `PATH` from the manifest.
 - `--apt PACKAGE` — add an APT package to the image; repeatable.

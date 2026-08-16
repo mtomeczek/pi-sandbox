@@ -24,7 +24,9 @@
 #     TOOL=rust@1.90.0
 #     TOOL=uv@0.8.9
 #     TOOL=python@3.13.7
+#     TOOL=fnm@1.39.0
 #   Note: python@VERSION requires a uv@VERSION tool in the same profile.
+#   fnm versions may be written with or without the leading "v" release prefix.
 #
 # EXTENSION=type:spec
 #   Additional component/package installed after tools. Repeatable.
@@ -33,6 +35,13 @@
 #     cargo:CRATE[@VERSION]     Example: EXTENSION=cargo:cargo-deny@0.16.1
 #     uv:PACKAGE[@VERSION]      Example: EXTENSION=uv:ruff@0.12.9
 #   Note: uv:* requires a uv@VERSION tool in the same profile.
+#
+# NPM=PACKAGE[@VERSION]
+#   Global npm command-line package installed into the image. Repeatable.
+#   Package names may be scoped. Use an exact version for reproducible images.
+#   Examples:
+#     NPM=@angular/cli@20.3.9
+#     NPM=create-vite@7.1.7
 #
 # ENV=NAME=VALUE
 #   Environment variable baked into the image. Repeatable.

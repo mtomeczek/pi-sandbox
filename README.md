@@ -94,6 +94,22 @@ Create/update a profile manifest and image:
   --apt build-essential
 ```
 
+Create an Angular profile with a pinned global CLI package:
+
+```bash
+./pi-sandbox-create --create angular \
+  --tool fnm@1.39.0 \
+  --tool node@24.19.0 \
+  --npm @angular/cli@20.3.9
+```
+
+Profiles may also contain repeatable npm directives directly:
+
+```text
+NPM=@angular/cli@20.3.9
+NPM=create-vite@7.1.7
+```
+
 Build an existing profile if the image is missing:
 
 ```bash

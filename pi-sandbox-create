@@ -37,6 +37,7 @@ CLEAN_IMAGE=0
 YES=0
 TOOL_SPECS=()
 EXTENSION_SPECS=()
+NPM_SPECS=()
 MANIFEST_ENVS=()
 MANIFEST_PATHS=()
 MANIFEST_APT=()
@@ -57,6 +58,14 @@ run_cmd() { if (( VERBOSE || DRY_RUN )); then printf '+ '; shell_join "$@"; fi; 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
 
 tool_known() { case "$1" in go|rust|jvm|uv|fnm|node|python) return 0 ;; *) return 1 ;; esac; }
+
+validate_npm_spec() {
+    local spec="$1"
+    [[ "$spec" =~ ^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._+~-]*)?$ ]] || {
+        err "invalid npm package '$spec' (expected PACKAGE[@VERSION])"
+        return 1
+    }
+}
 
 write_default_config() {
     mkdir -p -- "$(dirname -- "$CONFIG_FILE")"
@@ -118,6 +127,7 @@ write_manifest() {
         echo "PI_VERSION=${PI_VERSION}"
         for spec in "${TOOL_SPECS[@]}"; do echo "TOOL=${spec}"; done
         for spec in "${EXTENSION_SPECS[@]}"; do echo "EXTENSION=${spec}"; done
+        for spec in "${NPM_SPECS[@]}"; do echo "NPM=${spec}"; done
         for spec in "${MANIFEST_ENVS[@]}"; do echo "ENV=${spec}"; done
         for spec in "${MANIFEST_PATHS[@]}"; do echo "PATH=${spec}"; done
         for spec in "${MANIFEST_APT[@]}"; do echo "APT=${spec}"; done
@@ -129,7 +139,7 @@ load_manifest() {
     [[ -n "$PROFILE" ]] || return 0
     PROFILE_FILE="${PROFILES_DIR}/${PROFILE}.profile"
     [[ -f "$PROFILE_FILE" ]] || { err "profile '$PROFILE' does not exist ($PROFILE_FILE)"; exit 1; }
-    TOOL_SPECS=(); EXTENSION_SPECS=(); MANIFEST_ENVS=(); MANIFEST_PATHS=(); MANIFEST_APT=()
+    TOOL_SPECS=(); EXTENSION_SPECS=(); NPM_SPECS=(); MANIFEST_ENVS=(); MANIFEST_PATHS=(); MANIFEST_APT=()
     local line key value
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="$(trim "$line")"; [[ -z "$line" || "$line" == \#* ]] && continue
@@ -140,6 +150,7 @@ load_manifest() {
             PI_VERSION) PI_VERSION="$value" ;;
             TOOL) TOOL_SPECS+=("$value") ;;
             EXTENSION) EXTENSION_SPECS+=("$value") ;;
+            NPM) validate_npm_spec "$value" || exit 2; NPM_SPECS+=("$value") ;;
             ENV) MANIFEST_ENVS+=("$value") ;;
             PATH) MANIFEST_PATHS+=("$value") ;;
             APT) MANIFEST_APT+=("$value") ;;
@@ -166,6 +177,7 @@ write_containerfile() {
     for spec in "${EXTENSION_SPECS[@]}"; do
         case "$spec" in uv:*) [[ -n "$uv_version" ]] || { err "extension '$spec' requires --tool uv@VERSION"; exit 2; } ;; cargo:*|rustup:*) : ;; *) err "unsupported extension '$spec'"; exit 2 ;; esac
     done
+    for spec in "${NPM_SPECS[@]}"; do validate_npm_spec "$spec" || exit 2; done
 
     local snippets; snippets="$(mktemp)" || { err "cannot create temporary snippet file"; exit 1; }
     trap 'rm -f -- "${snippets:-}"' RETURN
@@ -220,8 +232,11 @@ EOF
           ;;
           fnm) cat >> "$snippets" <<EOF
 # fnm and managed Node versions live in XDG data/bin directories.
+# The fnm installer expects a GitHub release tag (for example v1.39.0), not
+# the unsupported --version option.
 RUN curl -fsSL https://fnm.vercel.app/install | \\
-    bash -s -- --version "${version}" --install-dir "\${XDG_DATA_HOME}/fnm" --skip-shell
+    bash -s -- --release "v${version#v}" --install-dir "\${XDG_DATA_HOME}/fnm" --skip-shell && \\
+    "\${XDG_DATA_HOME}/fnm/fnm" --version
 ENV FNM_DIR="\${XDG_DATA_HOME}/fnm"
 ENV PATH="\${FNM_DIR}:\${PATH}"
 EOF
@@ -237,6 +252,19 @@ EOF
           ;;
         esac
     done
+
+    if ((${#NPM_SPECS[@]})); then
+        cat >> "$snippets" <<'EOF'
+# Profile-defined npm command-line packages use a user-writable global prefix.
+ENV NPM_CONFIG_PREFIX="${XDG_DATA_HOME}/npm"
+ENV PATH="${NPM_CONFIG_PREFIX}/bin:${PATH}"
+EOF
+        for spec in "${NPM_SPECS[@]}"; do
+            cat >> "$snippets" <<EOF
+RUN npm install --global "${spec}"
+EOF
+        done
+    fi
 
     for spec in "${EXTENSION_SPECS[@]}"; do
         case "$spec" in
@@ -314,6 +342,7 @@ while [[ $# -gt 0 ]]; do
         --create) [[ $# -ge 2 ]] || { err "$1 requires PROFILE"; exit 2; }; PROFILE="$2"; CREATE_PROFILE=1; shift ;;
         --tool) [[ $# -ge 2 ]] || { err "$1 requires TOOL@VERSION"; exit 2; }; TOOL_SPECS+=("$2"); shift ;;
         --extension) [[ $# -ge 2 ]] || { err "$1 requires TYPE:SPEC"; exit 2; }; EXTENSION_SPECS+=("$2"); shift ;;
+        --npm) [[ $# -ge 2 ]] || { err "$1 requires PACKAGE[@VERSION]"; exit 2; }; validate_npm_spec "$2" || exit 2; NPM_SPECS+=("$2"); shift ;;
         --env) [[ $# -ge 2 ]] || { err "$1 requires NAME=VALUE"; exit 2; }; MANIFEST_ENVS+=("$2"); shift ;;
         --path) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; MANIFEST_PATHS+=("$2"); shift ;;
         --apt) [[ $# -ge 2 ]] || { err "$1 requires PACKAGE"; exit 2; }; MANIFEST_APT+=("$2"); shift ;;
@@ -349,6 +378,7 @@ if (( CREATE_PROFILE )); then
     ((${#TOOL_SPECS[@]})) || { err "profile creation requires at least one --tool TOOL@VERSION"; exit 2; }
     for spec in "${TOOL_SPECS[@]}"; do [[ "$spec" == *@* ]] || { err "'$spec': version is required"; exit 2; }; tool_known "${spec%%@*}" || { err "unsupported tool '${spec%%@*}'"; exit 2; }; done
     for spec in "${EXTENSION_SPECS[@]}"; do case "$spec" in uv:*|cargo:*|rustup:*) ;; *) err "unsupported extension '$spec'"; exit 2;; esac; done
+    for spec in "${NPM_SPECS[@]}"; do validate_npm_spec "$spec" || exit 2; done
     IMAGE="pi-sandbox-${PROFILE}:latest"
     CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox.${PROFILE}"
     write_manifest
@@ -369,6 +399,7 @@ if (( SHOW_INFO )); then
     printf '  Pi version:    %s\n' "$PI_VERSION"
     printf '  tools:         %s\n' "${TOOL_SPECS[*]:-base only}"
     printf '  extensions:    %s\n' "${EXTENSION_SPECS[*]:-none}"
+    printf '  npm packages:  %s\n' "${NPM_SPECS[*]:-none}"
     exit 0
 fi
 
