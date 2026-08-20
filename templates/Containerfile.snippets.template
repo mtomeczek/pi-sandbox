@@ -1,0 +1,56 @@
+@@ go
+# Go is installed in the user's XDG data tree.
+RUN arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=amd64;; arm64) a=arm64;; *) exit 1;; esac; \
+    mkdir -p "${XDG_DATA_HOME}/go-sdk" && \
+    curl -fsSLo /tmp/go.tgz "https://go.dev/dl/go{{VERSION}}.linux-${a}.tar.gz" && \
+    tar -C "${XDG_DATA_HOME}/go-sdk" --strip-components=1 -xzf /tmp/go.tgz && rm /tmp/go.tgz
+ENV GOROOT="${XDG_DATA_HOME}/go-sdk" GOPATH="${XDG_DATA_HOME}/go"
+ENV PATH="${GOROOT}/bin:${GOPATH}/bin:${PATH}"
+@@ rust
+# rustup/cargo live entirely under the user's XDG data tree.
+ENV RUSTUP_HOME="${XDG_DATA_HOME}/rustup" CARGO_HOME="${XDG_DATA_HOME}/cargo"
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --no-modify-path --profile minimal --default-toolchain "{{VERSION}}" && \
+    rustc --version && cargo --version
+@@ jvm
+# JDK is unpacked into the user's XDG data tree.
+RUN arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=x64;; arm64) a=aarch64;; *) exit 1;; esac; \
+    mkdir -p "${XDG_DATA_HOME}/java" && \
+    curl -fsSL "https://api.adoptium.net/v3/binary/version/jdk-{{VERSION}}/linux/${a}/jdk/hotspot/normal/eclipse" -o /tmp/jdk.tgz && \
+    tar -xzf /tmp/jdk.tgz -C "${XDG_DATA_HOME}/java" --strip-components=1 && rm /tmp/jdk.tgz
+ENV JAVA_HOME="${XDG_DATA_HOME}/java"
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+@@ uv
+# uv binary goes to XDG_BIN_HOME; uv data/cache follow XDG automatically.
+RUN curl -LsSf "https://astral.sh/uv/{{VERSION}}/install.sh" | \
+    env UV_UNMANAGED_INSTALL="${XDG_BIN_HOME}" sh
+ENV UV_PYTHON_INSTALL_DIR="${XDG_DATA_HOME}/uv/python" \
+    UV_PYTHON_BIN_DIR="${XDG_BIN_HOME}" \
+    UV_TOOL_BIN_DIR="${XDG_BIN_HOME}" \
+    UV_TOOL_DIR="${XDG_DATA_HOME}/uv/tools" \
+    UV_CACHE_DIR="${XDG_CACHE_HOME}/uv"
+@@ python
+# Python is managed by uv, not installed system-wide.
+RUN uv python install "{{VERSION}}" --default
+@@ fnm
+# fnm and managed Node versions live in XDG data/bin directories.
+RUN curl -fsSL https://fnm.vercel.app/install | \
+    bash -s -- --release "v{{VERSION}}" --install-dir "${XDG_DATA_HOME}/fnm" --skip-shell && \
+    "${XDG_DATA_HOME}/fnm/fnm" --version
+ENV FNM_DIR="${XDG_DATA_HOME}/fnm"
+ENV PATH="${FNM_DIR}:${PATH}"
+@@ npm-prefix
+# Profile-defined npm command-line packages use a user-writable global prefix.
+ENV NPM_CONFIG_PREFIX="${XDG_DATA_HOME}/npm"
+ENV PATH="${NPM_CONFIG_PREFIX}/bin:${PATH}"
+@@ npm-package
+RUN npm install --global "{{PACKAGE}}"
+@@ extension-uv
+RUN uv tool install "{{PACKAGE}}"
+@@ extension-cargo
+RUN cargo install --locked {{VERSION_ARG}} "{{CRATE}}"
+@@ extension-rustup
+RUN rustup component add "{{COMPONENT}}"
+@@ extension-fnm-node
+RUN fnm install "{{VERSION}}"

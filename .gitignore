@@ -2,9 +2,16 @@
 Containerfile.pi-sandbox*
 
 # Local environment/config files
+.pi/
 .env
 .env.*
 *.local
+
+# Agents related files
+graphify-out/
+/progress.md
+/findings.md
+/task_plan.md
 
 # Logs and temporary files
 *.log

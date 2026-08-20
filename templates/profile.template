@@ -19,7 +19,9 @@
 #
 # TOOL=name@version
 #   Toolchain to install into the image. Repeatable.
-#   Supported tools: go, rust, jvm, uv, fnm, node, python.
+#   Supported tools: go, rust, jvm, uv, fnm, python.
+#   Node is not a tool directive: use BASE_IMAGE for Pi's Node and FNM
+#   extensions for project Nodes.
 #   Examples:
 #     TOOL=rust@1.90.0
 #     TOOL=uv@0.8.9
@@ -34,7 +36,10 @@
 #     rustup:COMPONENT          Example: EXTENSION=rustup:clippy
 #     cargo:CRATE[@VERSION]     Example: EXTENSION=cargo:cargo-deny@0.16.1
 #     uv:PACKAGE[@VERSION]      Example: EXTENSION=uv:ruff@0.12.9
-#   Note: uv:* requires a uv@VERSION tool in the same profile.
+#     fnm:node@VERSION           Example: EXTENSION=fnm:node@14
+#   Note: uv:* requires a uv@VERSION tool; fnm:node@* requires an fnm@VERSION
+#   tool in the same profile. FNM project Nodes are installed only in
+#   ${XDG_DATA_HOME}/fnm/node-versions/.
 #
 # NPM=PACKAGE[@VERSION]
 #   Global npm command-line package installed into the image. Repeatable.

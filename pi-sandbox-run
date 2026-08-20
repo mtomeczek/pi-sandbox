@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# pi-sandbox-run: run an existing Pi sandbox image. It never builds images.
-
-SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")" || { printf 'error: cannot resolve script path\n' >&2; exit 1; }
+SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
 SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-run.md"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
-XDG_BIN_HOME="${XDG_BIN_HOME:-${HOME}/.local/bin}"
 CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
 CONFIG_FILE="${CONFIG_DIR}/config"
 ALLOWED_ROOTS_FILE="${CONFIG_DIR}/allowed-roots"
+CONFIG_TEMPLATE="${SCRIPT_DIR}/templates/run.config.template"
+ALLOWED_ROOTS_TEMPLATE="${SCRIPT_DIR}/templates/allowed-roots.template"
 
 IMAGE="pi-sandbox:latest"
 CONTAINER_USER="pi"
@@ -44,17 +43,41 @@ usage() {
     if [[ -r "$HELP_FILE" ]]; then
         cat "$HELP_FILE"
     else
-        printf 'error: help file not found: %s\n' "$HELP_FILE" >&2
+        printf 'Error: help file not found: %s\n' "$HELP_FILE" >&2
         return 1
     fi
 }
 
-err() { printf 'error: %s\n' "$*" >&2; }
-warn() { printf 'warning: %s\n' "$*" >&2; }
-log() { printf '==> %s\n' "$*"; }
+err() {
+    printf 'Error: %s\n' "$*" >&2
+}
 
-shell_join() { local out="" q arg; for arg in "$@"; do printf -v q '%q' "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "$out"; }
-run_cmd() { if (( VERBOSE || DRY_RUN )); then printf '+ '; shell_join "$@"; fi; (( DRY_RUN )) && return 0; "$@"; }
+warn() {
+    printf 'Warning: %s\n' "$*" >&2
+}
+
+log() {
+    printf '==> %s\n' "$*"
+}
+
+shell_join() {
+    local out="" q arg
+
+    for arg in "$@"; do
+        printf -v q '%q' "$arg"
+        out+="${out:+ }${q}"
+    done
+    printf '%s\n' "$out"
+}
+
+run_cmd() {
+    if (( VERBOSE || DRY_RUN )); then
+        printf '+ '
+        shell_join "$@"
+    fi
+    (( DRY_RUN )) && return 0
+    "$@"
+}
 
 trim() {
     local s="$1"
@@ -63,23 +86,25 @@ trim() {
     printf '%s' "$s"
 }
 
+render_template() {
+    local template="$1" output="$2" content key value
+    shift 2
+    [[ -r "$template" ]] || { err "Template not found: $template"; return 1; }
+    content="$(<"$template")"
+    while (($#)); do
+        key="${1%%=*}"; value="${1#*=}"
+        content="${content//\{\{$key\}\}/$value}"
+        shift
+    done
+    printf '%s\n' "$content" > "$output"
+}
+
 write_default_config() {
     mkdir -p -- "$(dirname -- "$CONFIG_FILE")"
-    cat > "$CONFIG_FILE" <<EOF
-# pi-sandbox runtime configuration
-CONTAINER_USER=${CONTAINER_USER}
-CONTAINER_UID=${CONTAINER_UID}
-CONTAINER_GID=${CONTAINER_GID}
-CONTAINER_HOME=${CONTAINER_HOME}
-STATE_VOLUME=${AGENT_VOLUME}
-MEMORY=${MEMORY}
-CPUS=${CPUS}
-PIDS_LIMIT=${PIDS_LIMIT}
-ENV_FILE=${ENV_FILE}
-NETWORK_MODE=${NETWORK_MODE}
-VERBOSE=${VERBOSE}
-# MOUNT=/host/path:/container/path:ro
-EOF
+    render_template "$CONFIG_TEMPLATE" "$CONFIG_FILE" \
+        "CONTAINER_USER=$CONTAINER_USER" "CONTAINER_UID=$CONTAINER_UID" "CONTAINER_GID=$CONTAINER_GID" \
+        "CONTAINER_HOME=$CONTAINER_HOME" "STATE_VOLUME=$AGENT_VOLUME" "MEMORY=$MEMORY" "CPUS=$CPUS" \
+        "PIDS_LIMIT=$PIDS_LIMIT" "ENV_FILE=$ENV_FILE" "NETWORK_MODE=$NETWORK_MODE" "VERBOSE=$VERBOSE"
 }
 
 write_default_allowed_roots() {
@@ -90,56 +115,47 @@ write_default_allowed_roots() {
         mkdir -p -- "$default_root"
     fi
     [[ -d "$default_root" && ! -L "$default_root" ]] || {
-        err "default allowed root must be a non-symlinked directory: $default_root"
+        err "Default allowed root must be a non-symlinked directory: $default_root"
         exit 1
     }
-    cat > "$ALLOWED_ROOTS_FILE" <<'EOF'
-# pi-sandbox allowed bind-mount roots
-# One directory path relative to $HOME per line. Edit this file by hand.
-# The listed roots must exist and must not contain hidden, '.', '..', or
-# symbolic-link path components. A mounted directory must be below a root;
-# the root directory itself cannot be mounted.
-src
-EOF
+    [[ -r "$ALLOWED_ROOTS_TEMPLATE" ]] || { err "Template not found: $ALLOWED_ROOTS_TEMPLATE"; exit 1; }
+    render_template "$ALLOWED_ROOTS_TEMPLATE" "$ALLOWED_ROOTS_FILE" "DEFAULT_ROOT=$default_root"
 }
 
 load_allowed_roots() {
     [[ -f "$ALLOWED_ROOTS_FILE" ]] || write_default_allowed_roots
 
-    local line entry candidate canonical home_canonical component existing lineno=0 duplicate
+    local line entry canonical component existing lineno=0 duplicate
     local -a components
-    home_canonical="$(realpath -e -- "$HOME")" || { err "cannot resolve HOME: $HOME"; exit 1; }
-    [[ -d "$home_canonical" ]] || { err "HOME is not a directory: $HOME"; exit 1; }
     ALLOWED_ROOTS=()
 
     while IFS= read -r line || [[ -n "$line" ]]; do
         ((++lineno))
         entry="$(trim "$line")"
         [[ -z "$entry" || "$entry" == \#* ]] && continue
-        [[ "$entry" != /* ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: entry must be relative to HOME: $entry"; exit 2; }
-        while [[ "$entry" == */ ]]; do entry="${entry%/}"; done
-        [[ -n "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: empty root is not allowed"; exit 2; }
-        [[ "$entry" != *"//"* ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: empty path component: $entry"; exit 2; }
+        [[ "$entry" == /* ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Allowed root must be an absolute path: $entry"; exit 2; }
+        while [[ "$entry" != "/" && "$entry" == */ ]]; do entry="${entry%/}"; done
+        [[ "$entry" != "/" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Filesystem root is not an allowed root"; exit 2; }
+        [[ "$entry" != *"//"* ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Empty path component: $entry"; exit 2; }
 
-        IFS='/' read -r -a components <<< "$entry"
+        IFS='/' read -r -a components <<< "${entry#/}"
         for component in "${components[@]}"; do
             [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || {
-                err "$ALLOWED_ROOTS_FILE:$lineno: path traversal is not allowed: $entry"
+                err "$ALLOWED_ROOTS_FILE:$lineno: Path traversal is not allowed: $entry"
                 exit 2
             }
             [[ "$component" != .* ]] || {
-                err "$ALLOWED_ROOTS_FILE:$lineno: hidden directory is not allowed: $entry"
+                err "$ALLOWED_ROOTS_FILE:$lineno: Hidden directory is not allowed: $entry"
                 exit 2
             }
         done
 
-        candidate="${home_canonical}/${entry}"
-        [[ -e "$candidate" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: directory does not exist: $candidate"; exit 2; }
-        [[ -d "$candidate" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: entry is not a directory: $candidate"; exit 2; }
-        [[ ! -L "$candidate" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: symbolic link is not allowed: $candidate"; exit 2; }
-        canonical="$(realpath -e -- "$candidate")" || { err "$ALLOWED_ROOTS_FILE:$lineno: cannot resolve: $candidate"; exit 2; }
-        [[ "$canonical" == "$candidate" && "$canonical" == "$home_canonical/"* ]] || {
-            err "$ALLOWED_ROOTS_FILE:$lineno: entry escapes HOME or contains a symbolic link: $entry"
+        [[ -e "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Directory does not exist: $entry"; exit 2; }
+        [[ -d "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Entry is not a directory: $entry"; exit 2; }
+        [[ ! -L "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Symbolic link is not allowed: $entry"; exit 2; }
+        canonical="$(realpath -e -- "$entry")" || { err "$ALLOWED_ROOTS_FILE:$lineno: Cannot resolve: $entry"; exit 2; }
+        [[ "$canonical" == "$entry" ]] || {
+            err "$ALLOWED_ROOTS_FILE:$lineno: Allowed root contains a symbolic link: $entry"
             exit 2
         }
 
@@ -176,14 +192,14 @@ load_config() {
             NETWORK_MODE) NETWORK_MODE="$value" ;;
             MOUNT) EXTRA_MOUNTS+=("$value") ;;
             VERBOSE) [[ "$value" =~ ^(1|true|yes)$ ]] && VERBOSE=1 ;;
-            BASE_IMAGE|PI_VERSION|PROFILE_DIR) : ;; # creator settings; ignored by runner
+            BASE_IMAGE|PI_VERSION|PROFILE_DIR) : ;;
             *) err "$CONFIG_FILE:$lineno: unsupported config key '$key'"; exit 2 ;;
         esac
     done < "$CONFIG_FILE"
 }
 
 require_podman() {
-    command -v podman >/dev/null 2>&1 || { err "podman is not installed or not in PATH"; exit 1; }
+    command -v podman >/dev/null 2>&1 || { err "Podman is not installed or not in PATH"; exit 1; }
     (( DRY_RUN )) && return 0
     podman info >/dev/null 2>&1 || { err "Podman is installed but 'podman info' failed"; exit 1; }
 }
@@ -196,86 +212,13 @@ confirm() {
     [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
-resolve_link_target() {
-    local link="$1" target
-    target="$(readlink -- "$link")" || return 1
-    if [[ "$target" != /* ]]; then target="$(dirname -- "$link")/$target"; fi
-    realpath -m -- "$target"
-}
-
-install_user_links() {
-    local name target destination existing
-    local -a names=(pi-sandbox-create pi-sandbox-run)
-
-    [[ "$XDG_BIN_HOME" == /* ]] || { err "XDG_BIN_HOME must be an absolute path: $XDG_BIN_HOME"; return 1; }
-
-    # Preflight every destination before changing anything.
-    for name in "${names[@]}"; do
-        target="${SCRIPT_DIR}/${name}"
-        destination="${XDG_BIN_HOME}/${name}"
-        [[ -x "$target" ]] || { err "installation target is missing or not executable: $target"; return 1; }
-        if [[ -e "$destination" || -L "$destination" ]]; then
-            if [[ ! -L "$destination" ]]; then
-                err "refusing to replace non-symlink: $destination"
-                return 1
-            fi
-            existing="$(resolve_link_target "$destination")" || { err "cannot inspect symlink: $destination"; return 1; }
-            [[ "$existing" == "$target" ]] || {
-                err "refusing to replace unrelated symlink: $destination -> $(readlink -- "$destination")"
-                return 1
-            }
-        fi
-    done
-
-    mkdir -p -- "$XDG_BIN_HOME"
-    for name in "${names[@]}"; do
-        target="${SCRIPT_DIR}/${name}"
-        destination="${XDG_BIN_HOME}/${name}"
-        ln -sfn -- "$target" "$destination"
-        printf 'installed: %s -> %s\n' "$destination" "$target"
-    done
-
-    case ":${PATH}:" in
-        *":${XDG_BIN_HOME}:"*) ;;
-        *) warn "${XDG_BIN_HOME} is not in PATH" ;;
-    esac
-}
-
-remove_user_links() {
-    local name target destination existing
-    local -a names=(pi-sandbox-create pi-sandbox-run)
-
-    [[ "$XDG_BIN_HOME" == /* ]] || { err "XDG_BIN_HOME must be an absolute path: $XDG_BIN_HOME"; return 1; }
-
-    for name in "${names[@]}"; do
-        target="${SCRIPT_DIR}/${name}"
-        destination="${XDG_BIN_HOME}/${name}"
-        if [[ ! -e "$destination" && ! -L "$destination" ]]; then
-            printf 'not installed: %s\n' "$destination"
-            continue
-        fi
-        if [[ ! -L "$destination" ]]; then
-            warn "not removing non-symlink: $destination"
-            continue
-        fi
-        existing="$(resolve_link_target "$destination")" || { warn "cannot inspect symlink: $destination"; continue; }
-        if [[ "$existing" != "$target" ]]; then
-            warn "not removing unrelated symlink: $destination -> $(readlink -- "$destination")"
-            continue
-        fi
-        rm -- "$destination"
-        printf 'removed: %s\n' "$destination"
-    done
-}
-
-# Set by validate_host_directory on success.
 VALIDATED_PATH=""
 
 # Validate only the directory selected as the bind source and the components of
 # its path. Contents below that directory are deliberately not inspected; they
 # may contain hidden entries, files, or symbolic links.
 validate_host_directory() {
-    local source="$1" description="$2" root relative component canonical home_canonical allowed_roots_display
+    local source="$1" description="$2" root relative component canonical allowed_roots_display
     local -a components
 
     if [[ "$source" == ./* ]]; then
@@ -297,17 +240,11 @@ validate_host_directory() {
     [[ -d "$source" ]] || { err "$description must be a directory, not a file: $source"; return 1; }
     [[ ! -L "$source" ]] || { err "$description cannot be a symbolic link: $source"; return 1; }
 
-    canonical="$(realpath -e -- "$source")" || { err "cannot resolve $description: $source"; return 1; }
+    canonical="$(realpath -e -- "$source")" || { err "Cannot resolve $description: $source"; return 1; }
     [[ "$canonical" == "$source" ]] || {
         err "$description must not contain symbolic links, '.' or '..': $source"
         return 1
     }
-    home_canonical="$(realpath -e -- "$HOME")" || { err "cannot resolve HOME: $HOME"; return 1; }
-    [[ "$canonical" != "$home_canonical" ]] || {
-        err "$description cannot be the whole HOME directory: $canonical"
-        return 1
-    }
-
     relative=""
     for root in "${ALLOWED_ROOTS[@]}"; do
         if [[ "$canonical" == "$root/"* ]]; then
@@ -346,19 +283,19 @@ validate_container_mountpoint() {
     local target="$1" component
     local -a components
 
-    [[ "$target" == /* ]] || { err "mount destination must be an absolute path: $target"; return 1; }
-    [[ "$target" != "/" ]] || { err "mount destination cannot be the container root"; return 1; }
-    [[ "$target" != *"//"* ]] || { err "mount destination contains an empty path component: $target"; return 1; }
+    [[ "$target" == /* ]] || { err "Mount destination must be an absolute path: $target"; return 1; }
+    [[ "$target" != "/" ]] || { err "Mount destination cannot be the container root"; return 1; }
+    [[ "$target" != *"//"* ]] || { err "Mount destination contains an empty path component: $target"; return 1; }
 
     IFS='/' read -r -a components <<< "${target#/}"
     for component in "${components[@]}"; do
-        [[ -n "$component" ]] || { err "mount destination contains an empty path component: $target"; return 1; }
+        [[ -n "$component" ]] || { err "Mount destination contains an empty path component: $target"; return 1; }
         [[ "$component" != "." && "$component" != ".." ]] || {
-            err "mount destination contains path traversal: $target"
+            err "Mount destination contains path traversal: $target"
             return 1
         }
         [[ "$component" != .* ]] || {
-            err "mount destination contains a hidden directory: $target"
+            err "Mount destination contains a hidden directory: $target"
             return 1
         }
     done
@@ -378,15 +315,15 @@ resolve_workspace() {
 validate_mount_spec() {
     local spec="$1" source remainder target options=""
 
-    [[ "$spec" == *:* ]] || { err "invalid --mount '$spec'; expected HOST:CONTAINER[:ro|rw]"; return 1; }
+    [[ "$spec" == *:* ]] || { err "Invalid --mount '$spec'; expected HOST:CONTAINER[:ro|rw]"; return 1; }
     source="${spec%%:*}"
     remainder="${spec#*:}"
     target="${remainder%%:*}"
     if [[ "$remainder" == *:* ]]; then
         options="${remainder#*:}"
-        [[ "$options" != *:* ]] || { err "invalid --mount options in '$spec'"; return 1; }
+        [[ "$options" != *:* ]] || { err "Invalid --mount options in '$spec'"; return 1; }
         [[ "$options" == "ro" || "$options" == "rw" ]] || {
-            err "mount options must be 'ro' or 'rw': $spec"
+            err "Mount options must be 'ro' or 'rw': $spec"
             return 1
         }
     fi
@@ -397,11 +334,6 @@ validate_mount_spec() {
     VALIDATED_PATH="${source}:${target}${options:+:${options}}"
 }
 
-if [[ ${1:-} == "--install" || ${1:-} == "--remove" ]]; then
-    [[ $# -eq 1 ]] || { err "${1} cannot be combined with other arguments"; exit 2; }
-    if [[ "$1" == "--install" ]]; then install_user_links; else remove_user_links; fi
-    exit $?
-fi
 if [[ $# -eq 1 && ( ${1:-} == "--help" || ${1:-} == "-h" ) ]]; then
     usage
     exit 0
@@ -451,19 +383,19 @@ while [[ $# -gt 0 ]]; do
             if [[ "$1" != -* && -z "$PROFILE" ]]; then
                 PROFILE="$1"
             else
-                err "unknown option: $1"; usage >&2; exit 2
+                err "Unknown option: $1"; usage >&2; exit 2
             fi
             ;;
     esac
     shift
 done
 
-[[ -z "$PROFILE" || "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "invalid profile name '$PROFILE'"; exit 2; }
-[[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "invalid sandbox name '$INSTANCE_NAME'"; exit 2; }
-[[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "container UID must be numeric"; exit 2; }
-[[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "container GID must be numeric"; exit 2; }
-[[ "$PIDS_LIMIT" =~ ^[0-9]+$ ]] || { err "pids limit must be numeric"; exit 2; }
-[[ "$CONTAINER_HOME" == /* ]] || { err "container home must be an absolute path"; exit 2; }
+[[ -z "$PROFILE" || "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid profile name '$PROFILE'"; exit 2; }
+[[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid sandbox name '$INSTANCE_NAME'"; exit 2; }
+[[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "Container UID must be numeric"; exit 2; }
+[[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "Container GID must be numeric"; exit 2; }
+[[ "$PIDS_LIMIT" =~ ^[0-9]+$ ]] || { err "PIDs limit must be numeric"; exit 2; }
+[[ "$CONTAINER_HOME" == /* ]] || { err "Container home must be an absolute path"; exit 2; }
 
 if [[ -n "$PROFILE" ]]; then
     IMAGE="pi-sandbox-${PROFILE}:latest"
@@ -476,7 +408,7 @@ require_podman
 
 if (( SHOW_INFO )); then
     resolve_workspace || exit 2
-    echo "pi-sandbox runtime configuration"
+    echo "Pi-sandbox runtime configuration"
     printf '  profile:             %s\n' "${PROFILE:-default}"
     printf '  image:               %s\n' "$IMAGE"
     printf '  container user:      %s (%s:%s)\n' "$CONTAINER_USER" "$CONTAINER_UID" "$CONTAINER_GID"
@@ -496,13 +428,23 @@ if (( SHOW_INFO )); then
 fi
 
 if (( SHOW_STATE )); then
-    if (( DRY_RUN )); then echo "+ podman volume inspect $(printf '%q' "$AGENT_VOLUME")"; exit 0; fi
-    if podman volume exists "$AGENT_VOLUME"; then podman volume inspect "$AGENT_VOLUME"; else echo "State volume '$AGENT_VOLUME' does not exist."; fi
+    if (( DRY_RUN )); then
+        echo "+ podman volume inspect $(printf '%q' "$AGENT_VOLUME")"
+        exit 0
+    fi
+    if podman volume exists "$AGENT_VOLUME"; then
+        podman volume inspect "$AGENT_VOLUME"
+    else
+        echo "State volume '$AGENT_VOLUME' does not exist."
+    fi
     exit 0
 fi
 
 if (( RESET_STATE )); then
-    if (( DRY_RUN )); then echo "+ podman volume rm $(printf '%q' "$AGENT_VOLUME")"; exit 0; fi
+    if (( DRY_RUN )); then
+        echo "+ podman volume rm $(printf '%q' "$AGENT_VOLUME")"
+        exit 0
+    fi
     if podman volume exists "$AGENT_VOLUME"; then
         confirm "Remove Pi state volume '$AGENT_VOLUME'? This deletes saved state." || exit 1
         run_cmd podman volume rm "$AGENT_VOLUME" >/dev/null
@@ -516,8 +458,8 @@ fi
 if (( DRY_RUN )); then
     echo "# Require existing image: $IMAGE"
 elif ! podman image exists "$IMAGE"; then
-    err "sandbox image '$IMAGE' does not exist"
-    err "ask an administrator to create it with: pi-sandbox-create${PROFILE:+ $PROFILE} --build"
+    err "Sandbox image '$IMAGE' does not exist"
+    err "Ask an administrator to create it with: pi-sandbox-create${PROFILE:+ $PROFILE} --build"
     exit 1
 fi
 
@@ -563,7 +505,7 @@ for mount in "${VALIDATED_MOUNTS[@]}"; do
 done
 
 if [[ -n "$ENV_FILE" ]]; then
-    [[ -r "$ENV_FILE" ]] || { err "environment file is not readable: $ENV_FILE"; exit 1; }
+    [[ -r "$ENV_FILE" ]] || { err "Environment file is not readable: $ENV_FILE"; exit 1; }
     RUN_ARGS+=(--env-file "$ENV_FILE")
 fi
 

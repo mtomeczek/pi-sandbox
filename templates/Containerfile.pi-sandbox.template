@@ -45,5 +45,26 @@ ENV HOME=/home/${USER_NAME} \
 ENV PATH="/home/${USER_NAME}/.local/bin:${PATH}"
 USER ${USER_UID}:${USER_GID}
 {{DYNAMIC_SNIPPETS}}
+
+# Dynamic snippets install user-owned toolchains. Switch back to root only to
+# install the global entrypoint used by Podman at container start.
+USER root
+# Pi always uses the base image's binaries. FNM only changes the environment
+# inherited by Pi's project commands.
+RUN set -eux; \
+    test -x /usr/local/bin/node; \
+    test -x /usr/local/bin/pi; \
+    pi_cli="$(readlink -f /usr/local/bin/pi)"; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      'set -euo pipefail' \
+      'if command -v fnm >/dev/null 2>&1; then' \
+      '  eval "$(fnm env --shell bash)"' \
+      '  fnm use --silent || true' \
+      'fi' \
+      "exec \"/usr/local/bin/node\" \"${pi_cli}\" \"\$@\"" \
+      > /usr/local/bin/pi-sandbox-entrypoint; \
+    chmod 0755 /usr/local/bin/pi-sandbox-entrypoint
+USER ${USER_UID}:${USER_GID}
 WORKDIR /home/${USER_NAME}/workspace
-ENTRYPOINT ["pi"]
+ENTRYPOINT ["/usr/local/bin/pi-sandbox-entrypoint"]

@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# pi-sandbox-create: administrator tool to create/build Pi sandbox images.
-
-SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")" || { printf 'error: cannot resolve script path\n' >&2; exit 1; }
+SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
 SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-create.md"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
@@ -12,6 +10,8 @@ CONFIG_FILE="${CONFIG_DIR}/config"
 PROFILES_DIR="${CONFIG_DIR}/profiles"
 CONTAINERFILE_DIR="${CONFIG_DIR}/dockerfiles"
 CONTAINERFILE_TEMPLATE="${SCRIPT_DIR}/templates/Containerfile.pi-sandbox.template"
+SNIPPET_TEMPLATE="${SCRIPT_DIR}/templates/Containerfile.snippets.template"
+CONFIG_TEMPLATE="${SCRIPT_DIR}/templates/create.config.template"
 PROFILE_MANIFEST_TEMPLATE="${SCRIPT_DIR}/templates/profile.template"
 
 IMAGE="pi-sandbox:latest"
@@ -46,38 +46,93 @@ usage() {
     if [[ -r "$HELP_FILE" ]]; then
         cat "$HELP_FILE"
     else
-        printf 'error: help file not found: %s\n' "$HELP_FILE" >&2
+        printf 'Error: help file not found: %s\n' "$HELP_FILE" >&2
         return 1
     fi
 }
 
-err() { printf 'error: %s\n' "$*" >&2; }
-log() { printf '==> %s\n' "$*"; }
-shell_join() { local out="" q arg; for arg in "$@"; do printf -v q '%q' "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "$out"; }
-run_cmd() { if (( VERBOSE || DRY_RUN )); then printf '+ '; shell_join "$@"; fi; (( DRY_RUN )) && return 0; "$@"; }
-trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
+err() {
+    printf 'Error: %s\n' "$*" >&2
+}
 
-tool_known() { case "$1" in go|rust|jvm|uv|fnm|node|python) return 0 ;; *) return 1 ;; esac; }
+log() {
+    printf '==> %s\n' "$*"
+}
+
+shell_join() {
+    local out="" q arg
+
+    for arg in "$@"; do
+        printf -v q '%q' "$arg"
+        out+="${out:+ }${q}"
+    done
+    printf '%s\n' "$out"
+}
+
+run_cmd() {
+    if (( VERBOSE || DRY_RUN )); then
+        printf '+ '
+        shell_join "$@"
+    fi
+    (( DRY_RUN )) && return 0
+    "$@"
+}
+
+trim() {
+    local s="$1"
+
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+tool_known() {
+    case "$1" in
+        go|rust|jvm|uv|fnm|python) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 validate_npm_spec() {
     local spec="$1"
     [[ "$spec" =~ ^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._+~-]*)?$ ]] || {
-        err "invalid npm package '$spec' (expected PACKAGE[@VERSION])"
+        err "Invalid npm package '$spec' (expected PACKAGE[@VERSION])"
         return 1
     }
 }
 
+render_template() {
+    local template="$1" output="$2" content key value
+    shift 2
+    [[ -r "$template" ]] || { err "Template not found: $template"; return 1; }
+    content="$(<"$template")"
+    while (($#)); do
+        key="${1%%=*}"; value="${1#*=}"
+        content="${content//\{\{$key\}\}/$value}"
+        shift
+    done
+    printf '%s\n' "$content" > "$output"
+}
+
+append_snippet() {
+    local output="$1" name="$2" content key value
+    shift 2
+    [[ -r "$SNIPPET_TEMPLATE" ]] || { err "Snippet template not found: $SNIPPET_TEMPLATE"; return 1; }
+    content="$(awk -v name="$name" '$0 == "@@ " name { found=1; next } /^@@ / { if (found) exit } found { print }' "$SNIPPET_TEMPLATE")"
+    [[ -n "$content" ]] || { err "Snippet not found: $name"; return 1; }
+    while (($#)); do
+        key="${1%%=*}"; value="${1#*=}"
+        content="${content//\{\{$key\}\}/$value}"
+        shift
+    done
+    printf '%s\n' "$content" >> "$output"
+}
+
 write_default_config() {
     mkdir -p -- "$(dirname -- "$CONFIG_FILE")"
-    cat > "$CONFIG_FILE" <<EOF
-# pi-sandbox configuration
-IMAGE=${IMAGE}
-BASE_IMAGE=${BASE_IMAGE}
-PI_VERSION=${PI_VERSION}
-CONTAINER_USER=${CONTAINER_USER}
-CONTAINER_UID=${CONTAINER_UID}
-CONTAINER_GID=${CONTAINER_GID}
-EOF
+    render_template "$CONFIG_TEMPLATE" "$CONFIG_FILE" \
+        "IMAGE=$IMAGE" "BASE_IMAGE=$BASE_IMAGE" "PI_VERSION=$PI_VERSION" \
+        "CONTAINER_USER=$CONTAINER_USER" "CONTAINER_UID=$CONTAINER_UID" "CONTAINER_GID=$CONTAINER_GID"
 }
 
 load_config() {
@@ -86,7 +141,7 @@ load_config() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         ((++lineno)); line="$(trim "$line")"
         [[ -z "$line" || "$line" == \#* ]] && continue
-        [[ "$line" == *=* ]] || { err "$CONFIG_FILE:$lineno: expected KEY=VALUE"; exit 2; }
+        [[ "$line" == *=* ]] || { err "$CONFIG_FILE:$lineno: Expected KEY=VALUE"; exit 2; }
         key="$(trim "${line%%=*}")"; value="$(trim "${line#*=}")"
         if [[ "$value" == \"*\" && "$value" == *\" ]]; then value="${value:1:${#value}-2}"; fi
         if [[ "$value" == \'*\' && "$value" == *\' ]]; then value="${value:1:${#value}-2}"; fi
@@ -97,16 +152,16 @@ load_config() {
             CONTAINER_USER) CONTAINER_USER="$value" ;;
             CONTAINER_UID) CONTAINER_UID="$value" ;;
             CONTAINER_GID) CONTAINER_GID="$value" ;;
-            PROFILE_DIR) : ;; # legacy setting; manifests always use the XDG profiles directory
+            PROFILE_DIR) : ;;
             VERBOSE) [[ "$value" =~ ^(1|true|yes)$ ]] && VERBOSE=1 ;;
-            CONTAINER_HOME|STATE_VOLUME|AGENT_VOLUME|MEMORY|CPUS|PIDS_LIMIT|ENV_FILE|NETWORK_MODE|MOUNT) : ;; # runner settings
-            *) err "$CONFIG_FILE:$lineno: unsupported config key '$key'"; exit 2 ;;
+            CONTAINER_HOME|STATE_VOLUME|AGENT_VOLUME|MEMORY|CPUS|PIDS_LIMIT|ENV_FILE|NETWORK_MODE|MOUNT) : ;;
+            *) err "$CONFIG_FILE:$lineno: Unsupported config key '$key'"; exit 2 ;;
         esac
     done < "$CONFIG_FILE"
 }
 
 validate_profile_name() {
-    [[ -z "$PROFILE" || "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "invalid profile name '$PROFILE'"; exit 2; }
+    [[ -z "$PROFILE" || "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid profile name '$PROFILE'"; exit 2; }
 }
 
 write_manifest() {
@@ -115,7 +170,7 @@ write_manifest() {
         echo "+ write manifest $(printf '%q' "$PROFILE_FILE") with preamble $(printf '%q' "$PROFILE_MANIFEST_TEMPLATE")"
         return 0
     fi
-    [[ -r "$PROFILE_MANIFEST_TEMPLATE" ]] || { err "profile manifest template not found: $PROFILE_MANIFEST_TEMPLATE"; exit 1; }
+    [[ -r "$PROFILE_MANIFEST_TEMPLATE" ]] || { err "Profile manifest template not found: $PROFILE_MANIFEST_TEMPLATE"; exit 1; }
     mkdir -p -- "$PROFILES_DIR"
     {
         cat "$PROFILE_MANIFEST_TEMPLATE"
@@ -138,7 +193,7 @@ write_manifest() {
 load_manifest() {
     [[ -n "$PROFILE" ]] || return 0
     PROFILE_FILE="${PROFILES_DIR}/${PROFILE}.profile"
-    [[ -f "$PROFILE_FILE" ]] || { err "profile '$PROFILE' does not exist ($PROFILE_FILE)"; exit 1; }
+    [[ -f "$PROFILE_FILE" ]] || { err "Profile '$PROFILE' does not exist ($PROFILE_FILE)"; exit 1; }
     TOOL_SPECS=(); EXTENSION_SPECS=(); NPM_SPECS=(); MANIFEST_ENVS=(); MANIFEST_PATHS=(); MANIFEST_APT=()
     local line key value
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -148,13 +203,14 @@ load_manifest() {
             PROFILE) : ;;
             BASE_IMAGE) BASE_IMAGE="$value" ;;
             PI_VERSION) PI_VERSION="$value" ;;
+            PROJECT_NODE) EXTENSION_SPECS+=("fnm:node@$value") ;;
             TOOL) TOOL_SPECS+=("$value") ;;
             EXTENSION) EXTENSION_SPECS+=("$value") ;;
             NPM) validate_npm_spec "$value" || exit 2; NPM_SPECS+=("$value") ;;
             ENV) MANIFEST_ENVS+=("$value") ;;
             PATH) MANIFEST_PATHS+=("$value") ;;
             APT) MANIFEST_APT+=("$value") ;;
-            *) err "$PROFILE_FILE: unsupported key '$key'"; exit 2 ;;
+            *) err "$PROFILE_FILE: Unsupported key '$key'"; exit 2 ;;
         esac
     done < "$PROFILE_FILE"
     IMAGE="pi-sandbox-${PROFILE}:latest"
@@ -167,122 +223,60 @@ write_containerfile() {
     [[ -r "$CONTAINERFILE_TEMPLATE" ]] || { err "Containerfile template not found: $CONTAINERFILE_TEMPLATE"; exit 1; }
     mkdir -p -- "$(dirname -- "$CONTAINERFILE")"
 
-    local uv_version="" spec tool version
+    local uv_version="" fnm_version="" spec tool version
     for spec in "${TOOL_SPECS[@]}"; do
-        [[ "$spec" == *@* ]] || { err "tool '$spec' must include a version"; exit 2; }
+        [[ "$spec" == *@* ]] || { err "Tool '$spec' must include a version"; exit 2; }
         tool="${spec%%@*}"; version="${spec#*@}"
-        tool_known "$tool" || { err "unsupported tool '$tool'"; exit 2; }
+        tool_known "$tool" || { err "Unsupported tool '$tool'"; exit 2; }
         [[ "$tool" == "uv" ]] && uv_version="$version"
+        [[ "$tool" == "fnm" ]] && fnm_version="$version"
     done
     for spec in "${EXTENSION_SPECS[@]}"; do
-        case "$spec" in uv:*) [[ -n "$uv_version" ]] || { err "extension '$spec' requires --tool uv@VERSION"; exit 2; } ;; cargo:*|rustup:*) : ;; *) err "unsupported extension '$spec'"; exit 2 ;; esac
+        case "$spec" in
+            uv:*) [[ -n "$uv_version" ]] || { err "Extension '$spec' requires --tool uv@VERSION"; exit 2; } ;;
+            fnm:node@*) [[ -n "$fnm_version" ]] || { err "Extension '$spec' requires --tool fnm@VERSION"; exit 2; }; [[ -n "${spec#fnm:node@}" ]] || { err "Extension '$spec' requires a Node version"; exit 2; } ;;
+            cargo:*|rustup:*) : ;;
+            *) err "Unsupported extension '$spec'"; exit 2 ;;
+        esac
     done
     for spec in "${NPM_SPECS[@]}"; do validate_npm_spec "$spec" || exit 2; done
 
-    local snippets; snippets="$(mktemp)" || { err "cannot create temporary snippet file"; exit 1; }
+    local snippets; snippets="$(mktemp)" || { err "Cannot create temporary snippet file"; exit 1; }
     trap 'rm -f -- "${snippets:-}"' RETURN
 
     for spec in "${TOOL_SPECS[@]}"; do
         tool="${spec%%@*}"; version="${spec#*@}"
         case "$tool" in
-          go) cat >> "$snippets" <<EOF
-# Go is installed in the user's XDG data tree.
-RUN arch="\$(dpkg --print-architecture)"; case "\$arch" in amd64) a=amd64;; arm64) a=arm64;; *) exit 1;; esac; \\
-    mkdir -p "\${XDG_DATA_HOME}/go-sdk" && \\
-    curl -fsSLo /tmp/go.tgz "https://go.dev/dl/go${version}.linux-\${a}.tar.gz" && \\
-    tar -C "\${XDG_DATA_HOME}/go-sdk" --strip-components=1 -xzf /tmp/go.tgz && rm /tmp/go.tgz
-ENV GOROOT="\${XDG_DATA_HOME}/go-sdk" GOPATH="\${XDG_DATA_HOME}/go"
-ENV PATH="\${GOROOT}/bin:\${GOPATH}/bin:\${PATH}"
-EOF
-          ;;
-          rust) cat >> "$snippets" <<EOF
-# rustup/cargo live entirely under the user's XDG data tree.
-ENV RUSTUP_HOME="\${XDG_DATA_HOME}/rustup" CARGO_HOME="\${XDG_DATA_HOME}/cargo"
-ENV PATH="\${CARGO_HOME}/bin:\${PATH}"
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \\
-    sh -s -- -y --no-modify-path --profile minimal --default-toolchain "${version}" && \\
-    rustc --version && cargo --version
-EOF
-          ;;
-          jvm) cat >> "$snippets" <<EOF
-# JDK is unpacked into the user's XDG data tree.
-RUN arch="\$(dpkg --print-architecture)"; case "\$arch" in amd64) a=x64;; arm64) a=aarch64;; *) exit 1;; esac; \\
-    mkdir -p "\${XDG_DATA_HOME}/java" && \\
-    curl -fsSL "https://api.adoptium.net/v3/binary/version/jdk-${version}/linux/\${a}/jdk/hotspot/normal/eclipse" -o /tmp/jdk.tgz && \\
-    tar -xzf /tmp/jdk.tgz -C "\${XDG_DATA_HOME}/java" --strip-components=1 && rm /tmp/jdk.tgz
-ENV JAVA_HOME="\${XDG_DATA_HOME}/java"
-ENV PATH="\${JAVA_HOME}/bin:\${PATH}"
-EOF
-          ;;
-          uv) cat >> "$snippets" <<EOF
-# uv binary goes to XDG_BIN_HOME; uv data/cache follow XDG automatically.
-RUN curl -LsSf "https://astral.sh/uv/${version}/install.sh" | \\
-    env UV_UNMANAGED_INSTALL="\${XDG_BIN_HOME}" sh
-ENV UV_PYTHON_INSTALL_DIR="\${XDG_DATA_HOME}/uv/python" \\
-    UV_PYTHON_BIN_DIR="\${XDG_BIN_HOME}" \\
-    UV_TOOL_BIN_DIR="\${XDG_BIN_HOME}" \\
-    UV_TOOL_DIR="\${XDG_DATA_HOME}/uv/tools" \\
-    UV_CACHE_DIR="\${XDG_CACHE_HOME}/uv"
-EOF
-          ;;
-          python) [[ -n "$uv_version" ]] || { err "python@${version} requires uv; add --tool uv@VERSION"; exit 2; }; cat >> "$snippets" <<EOF
-# Python is managed by uv, not installed system-wide.
-RUN uv python install "${version}" --default
-EOF
-          ;;
-          fnm) cat >> "$snippets" <<EOF
-# fnm and managed Node versions live in XDG data/bin directories.
-# The fnm installer expects a GitHub release tag (for example v1.39.0), not
-# the unsupported --version option.
-RUN curl -fsSL https://fnm.vercel.app/install | \\
-    bash -s -- --release "v${version#v}" --install-dir "\${XDG_DATA_HOME}/fnm" --skip-shell && \\
-    "\${XDG_DATA_HOME}/fnm/fnm" --version
-ENV FNM_DIR="\${XDG_DATA_HOME}/fnm"
-ENV PATH="\${FNM_DIR}:\${PATH}"
-EOF
-          ;;
-          node) cat >> "$snippets" <<EOF
-# Standalone Node version is stored under XDG data.
-RUN arch="\$(dpkg --print-architecture)"; case "\$arch" in amd64) a=x64;; arm64) a=arm64;; *) exit 1;; esac; \\
-    mkdir -p "\${XDG_DATA_HOME}/node" && \\
-    curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v${version}/node-v${version}-linux-\${a}.tar.xz" && \\
-    tar -xJf /tmp/node.tar.xz -C "\${XDG_DATA_HOME}/node" --strip-components=1 && rm /tmp/node.tar.xz
-ENV PATH="\${XDG_DATA_HOME}/node/bin:\${PATH}"
-EOF
-          ;;
+          go|rust|jvm|uv) append_snippet "$snippets" "$tool" "VERSION=$version" ;;
+          python) [[ -n "$uv_version" ]] || { err "Python@${version} requires uv; add --tool uv@VERSION"; exit 2; }; append_snippet "$snippets" python "VERSION=$version" ;;
+          fnm) append_snippet "$snippets" fnm "VERSION=${version#v}" ;;
         esac
     done
 
     if ((${#NPM_SPECS[@]})); then
-        cat >> "$snippets" <<'EOF'
-# Profile-defined npm command-line packages use a user-writable global prefix.
-ENV NPM_CONFIG_PREFIX="${XDG_DATA_HOME}/npm"
-ENV PATH="${NPM_CONFIG_PREFIX}/bin:${PATH}"
-EOF
-        for spec in "${NPM_SPECS[@]}"; do
-            cat >> "$snippets" <<EOF
-RUN npm install --global "${spec}"
-EOF
-        done
+        append_snippet "$snippets" npm-prefix
+        for spec in "${NPM_SPECS[@]}"; do append_snippet "$snippets" npm-package "PACKAGE=$spec"; done
     fi
 
     for spec in "${EXTENSION_SPECS[@]}"; do
         case "$spec" in
-          uv:*) local ext="${spec#uv:}"; echo "RUN uv tool install \"${ext}\"" >> "$snippets" ;;
-          cargo:*) local ext="${spec#cargo:}" crate version_arg=""; crate="${ext%%@*}"; [[ "$ext" == *@* ]] && version_arg="--version ${ext#*@}"; echo "RUN cargo install --locked ${version_arg} \"${crate}\"" >> "$snippets" ;;
-          rustup:*) local component="${spec#rustup:}"; echo "RUN rustup component add \"${component}\"" >> "$snippets" ;;
+          uv:*) append_snippet "$snippets" extension-uv "PACKAGE=${spec#uv:}" ;;
+          cargo:*) local ext="${spec#cargo:}" crate="${ext%%@*}" version_arg=""; [[ "$ext" == *@* ]] && version_arg="--version ${ext#*@}"; append_snippet "$snippets" extension-cargo "CRATE=$crate" "VERSION_ARG=$version_arg" ;;
+          rustup:*) append_snippet "$snippets" extension-rustup "COMPONENT=${spec#rustup:}" ;;
+          fnm:node@*) append_snippet "$snippets" extension-fnm-node "VERSION=${spec#fnm:node@}" ;;
         esac
     done
     for spec in "${MANIFEST_ENVS[@]}"; do
-        [[ "$spec" == *=* ]] || { err "invalid ENV entry '$spec'"; exit 2; }
+        [[ "$spec" == *=* ]] || { err "Invalid ENV entry '$spec'"; exit 2; }
         local name="${spec%%=*}" value="${spec#*=}"
-        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { err "invalid environment variable '$name'"; exit 2; }
+        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { err "Invalid environment variable '$name'"; exit 2; }
         printf 'ENV %s="%s"\n' "$name" "$value" >> "$snippets"
     done
     for spec in "${MANIFEST_PATHS[@]}"; do printf 'ENV PATH="%s:${PATH}"\n' "$spec" >> "$snippets"; done
 
     local line
     while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
         case "$line" in
           '{{APT_PACKAGES}}') if ((${#MANIFEST_APT[@]})); then printf '      %s \\\n' "${MANIFEST_APT[@]}"; fi ;;
           '{{DYNAMIC_SNIPPETS}}') cat "$snippets" ;;
@@ -293,7 +287,7 @@ EOF
 }
 
 require_podman() {
-    command -v podman >/dev/null 2>&1 || { err "podman is not installed or not in PATH"; exit 1; }
+    command -v podman >/dev/null 2>&1 || { err "Podman is not installed or not in PATH"; exit 1; }
     (( DRY_RUN )) && return 0
     podman info >/dev/null 2>&1 || { err "Podman is installed but 'podman info' failed"; exit 1; }
 }
@@ -301,7 +295,7 @@ require_podman() {
 image_exists() { podman image exists "$IMAGE"; }
 
 build_image() {
-    local context; context="$(mktemp -d)" || { err "cannot create temporary build context"; exit 1; }
+    local context; context="$(mktemp -d)" || { err "Cannot create temporary build context"; exit 1; }
     trap 'rm -rf -- "${context:-}"' RETURN
     log "Building $IMAGE"
     echo "    Pi:            $PI_VERSION"
@@ -316,9 +310,6 @@ build_image() {
 
 confirm() { (( YES )) && return 0; [[ -t 0 ]] || { err "$1 requires confirmation; rerun with --yes"; return 1; }; local answer; read -r -p "$1 [y/N] " answer; [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]; }
 
-if [[ ${1:-} == "--install" || ${1:-} == "--remove" ]]; then
-    exec "${SCRIPT_DIR}/pi-sandbox-run" "$@"
-fi
 if [[ $# -eq 1 && ( ${1:-} == "--help" || ${1:-} == "-h" ) ]]; then
     usage
     exit 0
@@ -343,6 +334,7 @@ while [[ $# -gt 0 ]]; do
         --tool) [[ $# -ge 2 ]] || { err "$1 requires TOOL@VERSION"; exit 2; }; TOOL_SPECS+=("$2"); shift ;;
         --extension) [[ $# -ge 2 ]] || { err "$1 requires TYPE:SPEC"; exit 2; }; EXTENSION_SPECS+=("$2"); shift ;;
         --npm) [[ $# -ge 2 ]] || { err "$1 requires PACKAGE[@VERSION]"; exit 2; }; validate_npm_spec "$2" || exit 2; NPM_SPECS+=("$2"); shift ;;
+        --project-node) [[ $# -ge 2 ]] || { err "$1 requires VERSION"; exit 2; }; EXTENSION_SPECS+=("fnm:node@$2"); shift ;;
         --env) [[ $# -ge 2 ]] || { err "$1 requires NAME=VALUE"; exit 2; }; MANIFEST_ENVS+=("$2"); shift ;;
         --path) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; MANIFEST_PATHS+=("$2"); shift ;;
         --apt) [[ $# -ge 2 ]] || { err "$1 requires PACKAGE"; exit 2; }; MANIFEST_APT+=("$2"); shift ;;
@@ -364,20 +356,20 @@ while [[ $# -gt 0 ]]; do
         --verbose|--debug) VERBOSE=1 ;;
         --yes|-y) YES=1 ;;
         --help|-h) usage; exit 0 ;;
-        *) err "unknown option: $1"; usage >&2; exit 2 ;;
+        *) err "Unknown option: $1"; usage >&2; exit 2 ;;
     esac
     shift
 done
 
 validate_profile_name
-[[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "container UID must be numeric"; exit 2; }
-[[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "container GID must be numeric"; exit 2; }
+[[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "Container UID must be numeric"; exit 2; }
+[[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "Container GID must be numeric"; exit 2; }
 
 if (( CREATE_PROFILE )); then
     [[ -n "$PROFILE" ]] || { err "--create requires a profile"; exit 2; }
-    ((${#TOOL_SPECS[@]})) || { err "profile creation requires at least one --tool TOOL@VERSION"; exit 2; }
-    for spec in "${TOOL_SPECS[@]}"; do [[ "$spec" == *@* ]] || { err "'$spec': version is required"; exit 2; }; tool_known "${spec%%@*}" || { err "unsupported tool '${spec%%@*}'"; exit 2; }; done
-    for spec in "${EXTENSION_SPECS[@]}"; do case "$spec" in uv:*|cargo:*|rustup:*) ;; *) err "unsupported extension '$spec'"; exit 2;; esac; done
+    ((${#TOOL_SPECS[@]})) || { err "Profile creation requires at least one --tool TOOL@VERSION"; exit 2; }
+    for spec in "${TOOL_SPECS[@]}"; do [[ "$spec" == *@* ]] || { err "'$spec': Version is required"; exit 2; }; tool_known "${spec%%@*}" || { err "Unsupported tool '${spec%%@*}'"; exit 2; }; done
+    for spec in "${EXTENSION_SPECS[@]}"; do case "$spec" in uv:*|cargo:*|rustup:*|fnm:node@?*) ;; *) err "Unsupported extension '$spec'"; exit 2;; esac; done
     for spec in "${NPM_SPECS[@]}"; do validate_npm_spec "$spec" || exit 2; done
     IMAGE="pi-sandbox-${PROFILE}:latest"
     CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox.${PROFILE}"
@@ -388,7 +380,7 @@ elif [[ -n "$PROFILE" ]]; then
 fi
 
 if (( SHOW_INFO )); then
-    echo "pi-sandbox build configuration"
+    echo "Pi-sandbox build configuration"
     printf '  profile:       %s\n' "${PROFILE:-default}"
     printf '  manifest:      %s\n' "${PROFILE_FILE:-none}"
     printf '  image:         %s\n' "$IMAGE"
@@ -406,17 +398,33 @@ fi
 require_podman
 
 if (( CLEAN_IMAGE )); then
-    if (( DRY_RUN )); then echo "+ podman image rm $(printf '%q' "$IMAGE")"; exit 0; fi
-    if podman image exists "$IMAGE"; then confirm "Remove image '$IMAGE'?" || exit 1; run_cmd podman image rm "$IMAGE"; else echo "Image '$IMAGE' does not exist."; fi
+    if (( DRY_RUN )); then
+        echo "+ podman image rm $(printf '%q' "$IMAGE")"
+        exit 0
+    fi
+    if podman image exists "$IMAGE"; then
+        confirm "Remove image '$IMAGE'?" || exit 1
+        run_cmd podman image rm "$IMAGE"
+    else
+        echo "Image '$IMAGE' does not exist."
+    fi
     exit 0
 fi
 
-if (( REGENERATE_CONTAINERFILE )) || [[ ! -f "$CONTAINERFILE" ]]; then write_containerfile; fi
+if (( REGENERATE_CONTAINERFILE )) || [[ ! -f "$CONTAINERFILE" ]]; then
+    write_containerfile
+fi
 
 if (( UPDATE )); then
     build_image
 elif (( BUILD )); then
-    if (( DRY_RUN )); then echo "# Build image only if missing: $IMAGE"; elif ! image_exists; then build_image; else log "Image already exists: $IMAGE"; fi
+    if (( DRY_RUN )); then
+        echo "# Build image only if missing: $IMAGE"
+    elif ! image_exists; then
+        build_image
+    else
+        log "Image already exists: $IMAGE"
+    fi
 else
     log "No build requested. Use --build or --update."
 fi

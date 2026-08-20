@@ -33,13 +33,9 @@ pi-sandbox-run rust -- --help
 - `--shell` — start `/bin/bash` instead of Pi.
 - `--image IMAGE` — override the image name.
 
-## User installation
+## Setup
 
-- `--install` — create user-local symlinks for `pi-sandbox-run` and `pi-sandbox-create`.
-- `--remove` — remove user-local symlinks created by `--install`.
-
-Symlinks are stored in `${XDG_BIN_HOME:-$HOME/.local/bin}`. Installation refuses
-to replace regular files or unrelated symlinks.
+Install or remove the user-local command symlinks with `pi-sandbox-setup`. See `pi-sandbox-setup --help` for details.
 
 ## State and information
 
@@ -77,8 +73,8 @@ same way. Each source must:
 
 The source may be nested at any depth below an approved root; it does not need
 to be a direct child. The approved roots themselves cannot be mounted. For
-example, with the default `src` root, `$HOME/src/team/project/shared` is
-allowed, but `$HOME/src`, `$HOME`, and `/` are rejected. A relative source is
+example, with the default `$HOME/src` root, `$HOME/src/team/project/shared` is
+allowed, but `$HOME/src` and `/` are rejected. A relative source is
 accepted only when it starts with `./`, such as `./shared-libs`; `../project`
 and `shared-libs` are rejected.
 
@@ -94,22 +90,21 @@ The file is created automatically with this default entry, and `$HOME/src` is
 created if it does not already exist:
 
 ```text
-src
+$HOME/src
 ```
 
-Each non-comment line is a directory path relative to `$HOME`. Entries can be
-edited by hand and may be nested, for example:
+Each non-comment line is an absolute directory path. Entries can be edited by
+hand to authorize any host location, for example:
 
 ```text
-src
-projects/team-a
-work/customer-a
+/home/you/src
+/workspaces/team-a
+/mnt/shared/customer-a
 ```
 
-Every entry must already be a directory below `$HOME`. Absolute paths, hidden
-components, `.`/`..`, empty components, symbolic-link components, and paths
-that resolve outside `$HOME` are rejected. An empty file disables all host
-directory mounts, including the starting directory.
+Every entry must already be a directory. Filesystem roots, hidden components,
+`.`/`..`, empty components, and symbolic-link components are rejected. An empty
+file disables all host directory mounts, including the starting directory.
 
 Validation applies only to the selected source directory and the components of
 its path. The directory contents are not scanned or restricted: they may contain

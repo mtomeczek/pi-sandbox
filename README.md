@@ -20,32 +20,32 @@ The project is split into two roles:
 | --- | --- |
 | `pi-sandbox-create` | Admin command for creating profile manifests, generating Containerfiles, and building/removing images. |
 | `pi-sandbox-run` | Standard-user command for running existing sandbox images. It never builds missing images. |
+| `pi-sandbox-setup` | Unix-only command for installing or removing the user-local command symlinks. |
 
 ## User-local installation
 
-Create symlinks for both commands in the XDG user binary directory:
+Create symlinks for the Unix commands in the XDG user binary directory:
 
 ```bash
-./pi-sandbox-run --install
+./pi-sandbox-setup --install
 ```
 
 This installs:
 
 ```text
-${XDG_BIN_HOME:-$HOME/.local/bin}/pi-sandbox-run
 ${XDG_BIN_HOME:-$HOME/.local/bin}/pi-sandbox-create
+${XDG_BIN_HOME:-$HOME/.local/bin}/pi-sandbox-run
+${XDG_BIN_HOME:-$HOME/.local/bin}/pi-sandbox-setup
 ```
 
-Make sure that directory is in `PATH`. The installer refuses to replace regular
-files or unrelated symlinks.
+Make sure that directory is in `PATH`. The setup command refuses to replace regular
+files or unrelated symlinks, and preflights every destination before changing any of them.
 
 Remove the installed symlinks with:
 
 ```bash
-pi-sandbox-run --remove
+pi-sandbox-setup --remove
 ```
-
-The same `--install` and `--remove` options are accepted by both commands.
 
 ## Quick start
 
@@ -60,6 +60,16 @@ This creates a profile manifest and builds:
 ```text
 pi-sandbox-rust:latest
 ```
+
+### Windows PowerShell 7
+
+Create with Windows Podman:
+
+```powershell
+.\pi-sandbox-create.ps1 --create node-legacy --tool fnm@1.39.0 --extension fnm:node@14
+```
+
+The Windows creator and runner share `%APPDATA%\pi-sandbox` (or `%USERPROFILE%\AppData\Roaming\pi-sandbox` when `%APPDATA%` is unavailable). See [Windows creator documentation](docs/pi-sandbox-create.windows.md).
 
 ### Standard user: run an existing profile image
 
@@ -99,7 +109,7 @@ Create an Angular profile with a pinned global CLI package:
 ```bash
 ./pi-sandbox-create --create angular \
   --tool fnm@1.39.0 \
-  --tool node@24.19.0 \
+  --extension fnm:node@22 \
   --npm @angular/cli@20.3.9
 ```
 
@@ -133,6 +143,21 @@ Show resolved build configuration:
 ```bash
 ./pi-sandbox-create rust --info
 ```
+
+## Project Node runtime
+
+The image's base Node remains the runtime for Pi itself. To give project commands a separate Node version, add FNM and pin the project runtime while creating a profile:
+
+```bash
+./pi-sandbox-create --create legacy \
+  --base-image node:24-bookworm-slim \
+  --tool fnm@1.39.0 \
+  --extension fnm:node@14 \
+  --extension fnm:node@25 \
+  --env FNM_VERSION_FILE_STRATEGY=recursive
+```
+
+The generated profile uses repeatable `EXTENSION=fnm:node@VERSION` directives. The base image supplies Pi's only runtime: `/usr/local/bin/pi` is always executed with `/usr/local/bin/node`. FNM project versions are installed only below `/home/pi/.local/share/fnm/node-versions/`. At startup, the entrypoint initializes FNM and asks it to use the workspace version file; `FNM_VERSION_FILE_STRATEGY=recursive` lets FNM find `.node-version` or `.nvmrc` in a parent directory. This changes the environment inherited by project commands without changing Pi's interpreter.
 
 ## Runner usage
 
@@ -170,30 +195,29 @@ be existing, non-symlinked directories strictly below a configured allowed
 root. They may be nested at any depth and do not need to be direct children.
 Sources may be absolute or start with `./`; `./` paths are expanded against the
 current directory before validation. Other relative paths are rejected. Files,
-the approved roots themselves, the whole `$HOME` directory, hidden directory
-components, `.`/`..` traversal, and paths outside configured roots are rejected.
+the approved roots themselves, hidden directory components, `.`/`..` traversal,
+and paths outside configured roots are rejected.
 
 Only the selected source directory and its path are validated. Its contents are
 not scanned and may include hidden files/directories, regular files, and
 symbolic links. Extra mount destinations must be absolute and cannot be `/`,
 hidden, or contain traversal components. Mount mode is limited to `ro` or `rw`.
 
-Allowed roots are configured one per line, relative to `$HOME`, in:
+Allowed roots are configured one absolute path per line in:
 
 ```text
 ${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/allowed-roots
 ```
 
-The file is created automatically with `src` as its default entry and can be
-edited by hand. `$HOME/src` is created if it does not already exist. Entries
-must be existing directories below `$HOME`; absolute
-paths, hidden components, `.`/`..`, empty components, symlinks, and paths that
-resolve outside `$HOME` are rejected. For example:
+The file is created automatically with `$HOME/src` as its default entry and can
+be edited by hand. `$HOME/src` is created if it does not already exist. Entries
+must be existing directories; filesystem roots, hidden components, `.`/`..`,
+empty components, and symlinks are rejected. For example:
 
 ```text
-src
-projects/team-a
-work/customer-a
+/home/you/src
+/workspaces/team-a
+/mnt/shared/customer-a
 ```
 
 Run with no network:
@@ -213,6 +237,17 @@ Show resolved runtime configuration:
 ```bash
 ./pi-sandbox-run rust --info
 ```
+
+### Windows PowerShell 7
+
+Use `pi-sandbox-run.ps1` with Windows Podman:
+
+```powershell
+.\pi-sandbox-run.ps1 rust --workspace C:\Users\you\src\backend
+.\pi-sandbox-run.ps1 rust --mount C:\Users\you\src\shared:/src:ro
+```
+
+Its per-user configuration is stored in `%APPDATA%\pi-sandbox` (falling back to `%USERPROFILE%\AppData\Roaming\pi-sandbox`), the Windows counterpart of the XDG configuration directory. See [Windows runner documentation](docs/pi-sandbox-run.windows.md).
 
 ## Profiles
 
@@ -248,10 +283,19 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/allowed-roots
 
 ## Templates and docs
 
-Containerfile generation uses:
+Containerfile generation uses the base template and external dynamic snippets:
 
 ```text
 templates/Containerfile.pi-sandbox.template
+templates/Containerfile.snippets.template
+```
+
+Default creator/runner configuration and allowed-roots content are also external templates:
+
+```text
+templates/create.config.template
+templates/run.config.template
+templates/allowed-roots.template
 ```
 
 New profile manifests include the explanatory preamble from:
@@ -265,6 +309,7 @@ Help text is externalized as Markdown:
 ```text
 docs/pi-sandbox-run.md
 docs/pi-sandbox-create.md
+docs/pi-sandbox-setup.md
 ```
 
 `-h` and `--help` print the corresponding Markdown file.
@@ -274,7 +319,7 @@ docs/pi-sandbox-create.md
 Run basic syntax checks:
 
 ```bash
-bash -n pi-sandbox-run pi-sandbox-create
+bash -n pi-sandbox-run pi-sandbox-create pi-sandbox-setup
 ```
 
 Verify help output is sourced from Markdown files:
@@ -282,6 +327,21 @@ Verify help output is sourced from Markdown files:
 ```bash
 cmp -s <(./pi-sandbox-run --help) docs/pi-sandbox-run.md
 cmp -s <(./pi-sandbox-create --help) docs/pi-sandbox-create.md
+cmp -s <(./pi-sandbox-setup --help) docs/pi-sandbox-setup.md
+```
+
+Run the setup safety regression test:
+
+```bash
+bash tests/setup.sh
+bash tests/allowed-roots.sh
+```
+
+Validate the Windows PowerShell launchers and their help contracts:
+
+```powershell
+pwsh -NoProfile -File .\pi-sandbox-create.ps1 --help | Compare-Object (Get-Content .\docs\pi-sandbox-create.windows.md)
+pwsh -NoProfile -File .\pi-sandbox-run.ps1 --help | Compare-Object (Get-Content .\docs\pi-sandbox-run.windows.md)
 ```
 
 ## Author

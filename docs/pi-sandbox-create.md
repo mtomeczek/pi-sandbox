@@ -14,7 +14,7 @@ pi-sandbox-create PROFILE --build [OPTIONS]
 
 ```bash
 pi-sandbox-create --build
-pi-sandbox-create --create rust --tool rust@1.90.0 --extension rustup:clippy
+pi-sandbox-create --create node-legacy --tool fnm@1.39.0 --extension fnm:node@14 --extension fnm:node@25 --env FNM_VERSION_FILE_STRATEGY=recursive
 pi-sandbox-create rust --build --pull
 pi-sandbox-create rust --regenerate-containerfile --no-cache
 ```
@@ -22,8 +22,8 @@ pi-sandbox-create rust --regenerate-containerfile --no-cache
 ## Profile management
 
 - `--create PROFILE` — create or update a versioned profile manifest.
-- `--tool TOOL@VERSION` — add a tool; repeatable. Supported tools: `go`, `rust`, `jvm`, `uv`, `fnm`, `node`, `python`.
-- `--extension TYPE:SPEC` — add an extension; repeatable. Supported extensions: `rustup:COMPONENT`, `cargo:CRATE[@VERSION]`, `uv:PACKAGE[@VERSION]`.
+- `--tool TOOL@VERSION` — add a tool; repeatable. Supported tools: `go`, `rust`, `jvm`, `uv`, `fnm`, `python`. Node for Pi comes exclusively from `--base-image`.
+- `--extension TYPE:SPEC` — add an extension; repeatable. Supported extensions: `rustup:COMPONENT`, `cargo:CRATE[@VERSION]`, `uv:PACKAGE[@VERSION]`, `fnm:node@VERSION`. The FNM Node extension requires `--tool fnm@VERSION` and installs only under the Pi user's FNM tree.
 - `--npm PACKAGE[@VERSION]` — install a global npm command-line package; repeatable. Scoped packages such as `@angular/cli@20.3.9` are supported.
 - `--env NAME=VALUE` — add an environment variable to the manifest.
 - `--path DIRECTORY` — prepend a directory to `PATH` from the manifest.
@@ -44,13 +44,9 @@ pi-sandbox-create rust --regenerate-containerfile --no-cache
 - `--container-uid UID` — runtime user UID.
 - `--container-gid GID` — runtime user GID.
 
-## User installation
+## Setup
 
-- `--install` — create user-local symlinks for `pi-sandbox-run` and `pi-sandbox-create`.
-- `--remove` — remove user-local symlinks created by `--install`.
-
-Symlinks are stored in `${XDG_BIN_HOME:-$HOME/.local/bin}`. Installation refuses
-to replace regular files or unrelated symlinks.
+Install or remove the user-local command symlinks with `pi-sandbox-setup`. See `pi-sandbox-setup --help` for details.
 
 ## Information
 
