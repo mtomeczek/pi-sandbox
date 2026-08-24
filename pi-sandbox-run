@@ -1,8 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
-SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+canonical_existing_path() {
+    local path="$1" directory name link
+
+    case "$path" in
+        /*) ;;
+        *) path="$PWD/$path" ;;
+    esac
+    while [[ -L "$path" ]]; do
+        directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+        link="$(readlink "$path")" || return 1
+        case "$link" in
+            /*) path="$link" ;;
+            *) path="$directory/$link" ;;
+        esac
+    done
+    [[ -e "$path" ]] || return 1
+    directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+    name="$(basename "$path")"
+    printf '%s/%s\n' "$directory" "$name"
+}
+
+SCRIPT_PATH="$(canonical_existing_path "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-run.md"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
@@ -100,7 +121,7 @@ render_template() {
 }
 
 write_default_config() {
-    mkdir -p -- "$(dirname -- "$CONFIG_FILE")"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
     render_template "$CONFIG_TEMPLATE" "$CONFIG_FILE" \
         "CONTAINER_USER=$CONTAINER_USER" "CONTAINER_UID=$CONTAINER_UID" "CONTAINER_GID=$CONTAINER_GID" \
         "CONTAINER_HOME=$CONTAINER_HOME" "STATE_VOLUME=$AGENT_VOLUME" "MEMORY=$MEMORY" "CPUS=$CPUS" \
@@ -110,9 +131,9 @@ write_default_config() {
 write_default_allowed_roots() {
     local default_root="${HOME}/src"
 
-    mkdir -p -- "$(dirname -- "$ALLOWED_ROOTS_FILE")"
+    mkdir -p "$(dirname "$ALLOWED_ROOTS_FILE")"
     if [[ ! -e "$default_root" ]]; then
-        mkdir -p -- "$default_root"
+        mkdir -p "$default_root"
     fi
     [[ -d "$default_root" && ! -L "$default_root" ]] || {
         err "Default allowed root must be a non-symlinked directory: $default_root"
@@ -153,7 +174,7 @@ load_allowed_roots() {
         [[ -e "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Directory does not exist: $entry"; exit 2; }
         [[ -d "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Entry is not a directory: $entry"; exit 2; }
         [[ ! -L "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Symbolic link is not allowed: $entry"; exit 2; }
-        canonical="$(realpath -e -- "$entry")" || { err "$ALLOWED_ROOTS_FILE:$lineno: Cannot resolve: $entry"; exit 2; }
+        canonical="$(canonical_existing_path "$entry")" || { err "$ALLOWED_ROOTS_FILE:$lineno: Cannot resolve: $entry"; exit 2; }
         [[ "$canonical" == "$entry" ]] || {
             err "$ALLOWED_ROOTS_FILE:$lineno: Allowed root contains a symbolic link: $entry"
             exit 2
@@ -240,7 +261,7 @@ validate_host_directory() {
     [[ -d "$source" ]] || { err "$description must be a directory, not a file: $source"; return 1; }
     [[ ! -L "$source" ]] || { err "$description cannot be a symbolic link: $source"; return 1; }
 
-    canonical="$(realpath -e -- "$source")" || { err "Cannot resolve $description: $source"; return 1; }
+    canonical="$(canonical_existing_path "$source")" || { err "Cannot resolve $description: $source"; return 1; }
     [[ "$canonical" == "$source" ]] || {
         err "$description must not contain symbolic links, '.' or '..': $source"
         return 1
@@ -345,7 +366,7 @@ for ((i=0; i<${#args[@]}; i++)); do
     if [[ "${args[i]}" == "--config" ]]; then
         (( i + 1 < ${#args[@]} )) || { err "--config requires FILE"; exit 2; }
         CONFIG_FILE="${args[i+1]}"
-        ALLOWED_ROOTS_FILE="$(dirname -- "$CONFIG_FILE")/allowed-roots"
+        ALLOWED_ROOTS_FILE="$(dirname "$CONFIG_FILE")/allowed-roots"
     fi
 done
 

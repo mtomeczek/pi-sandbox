@@ -1,8 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
-SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+canonical_existing_path() {
+    local path="$1" directory name link
+
+    case "$path" in
+        /*) ;;
+        *) path="$PWD/$path" ;;
+    esac
+    while [[ -L "$path" ]]; do
+        directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+        link="$(readlink "$path")" || return 1
+        case "$link" in
+            /*) path="$link" ;;
+            *) path="$directory/$link" ;;
+        esac
+    done
+    [[ -e "$path" ]] || return 1
+    directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+    name="$(basename "$path")"
+    printf '%s/%s\n' "$directory" "$name"
+}
+
+SCRIPT_PATH="$(canonical_existing_path "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-create.md"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
@@ -129,7 +150,7 @@ append_snippet() {
 }
 
 write_default_config() {
-    mkdir -p -- "$(dirname -- "$CONFIG_FILE")"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
     render_template "$CONFIG_TEMPLATE" "$CONFIG_FILE" \
         "IMAGE=$IMAGE" "BASE_IMAGE=$BASE_IMAGE" "PI_VERSION=$PI_VERSION" \
         "CONTAINER_USER=$CONTAINER_USER" "CONTAINER_UID=$CONTAINER_UID" "CONTAINER_GID=$CONTAINER_GID"
@@ -171,7 +192,7 @@ write_manifest() {
         return 0
     fi
     [[ -r "$PROFILE_MANIFEST_TEMPLATE" ]] || { err "Profile manifest template not found: $PROFILE_MANIFEST_TEMPLATE"; exit 1; }
-    mkdir -p -- "$PROFILES_DIR"
+    mkdir -p "$PROFILES_DIR"
     {
         cat "$PROFILE_MANIFEST_TEMPLATE"
         echo
@@ -221,7 +242,7 @@ write_containerfile() {
     log "Generating $CONTAINERFILE"
     (( DRY_RUN )) && return 0
     [[ -r "$CONTAINERFILE_TEMPLATE" ]] || { err "Containerfile template not found: $CONTAINERFILE_TEMPLATE"; exit 1; }
-    mkdir -p -- "$(dirname -- "$CONTAINERFILE")"
+    mkdir -p "$(dirname "$CONTAINERFILE")"
 
     local uv_version="" fnm_version="" spec tool version
     for spec in "${TOOL_SPECS[@]}"; do
@@ -242,7 +263,7 @@ write_containerfile() {
     for spec in "${NPM_SPECS[@]}"; do validate_npm_spec "$spec" || exit 2; done
 
     local snippets; snippets="$(mktemp)" || { err "Cannot create temporary snippet file"; exit 1; }
-    trap 'rm -f -- "${snippets:-}"' RETURN
+    trap 'rm -f "${snippets:-}"' RETURN
 
     for spec in "${TOOL_SPECS[@]}"; do
         tool="${spec%%@*}"; version="${spec#*@}"
@@ -283,7 +304,7 @@ write_containerfile() {
           *) printf '%s\n' "$line" ;;
         esac
     done < "$CONTAINERFILE_TEMPLATE" > "$CONTAINERFILE"
-    rm -f -- "$snippets"; trap - RETURN
+    rm -f "$snippets"; trap - RETURN
 }
 
 require_podman() {
@@ -296,7 +317,7 @@ image_exists() { podman image exists "$IMAGE"; }
 
 build_image() {
     local context; context="$(mktemp -d)" || { err "Cannot create temporary build context"; exit 1; }
-    trap 'rm -rf -- "${context:-}"' RETURN
+    trap 'rm -rf "${context:-}"' RETURN
     log "Building $IMAGE"
     echo "    Pi:            $PI_VERSION"
     echo "    base image:    $BASE_IMAGE"
@@ -305,7 +326,7 @@ build_image() {
     (( NO_CACHE )) && build_args+=(--no-cache)
     (( PULL )) && build_args+=(--pull=always)
     run_cmd podman build "${build_args[@]}" "$context"
-    rm -rf -- "$context"; trap - RETURN
+    rm -rf "$context"; trap - RETURN
 }
 
 confirm() { (( YES )) && return 0; [[ -t 0 ]] || { err "$1 requires confirmation; rerun with --yes"; return 1; }; local answer; read -r -p "$1 [y/N] " answer; [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]; }

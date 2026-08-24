@@ -6,9 +6,9 @@ This report documents the current implementation without changing it. “Cadence
 
 | Public command | Platform | Private implementation | Purpose | Direct caller |
 | --- | --- | --- | --- | --- |
-| `pi-sandbox-create` | Bash | same file | Create/update profile manifests, render Containerfiles, and build/remove images. | User/shell/installed symlink |
-| `pi-sandbox-run` | Bash | same file | Validate roots, workspaces, and mounts; then run an existing image. | User/shell/installed symlink |
-| `pi-sandbox-setup` | Bash | same file | Install/remove guarded user-local symlinks. | User/shell/installed symlink |
+| `pi-sandbox-create` | Bash (Linux/macOS) | same file | Create/update profile manifests, render Containerfiles, and build/remove images. | User/shell/installed symlink |
+| `pi-sandbox-run` | Bash (Linux/macOS) | same file | Validate roots, workspaces, and mounts; then run an existing image. | User/shell/installed symlink |
+| `pi-sandbox-setup` | Bash (Linux/macOS) | same file | Install/remove guarded user-local symlinks. | User/shell/installed symlink |
 | `pi-sandbox-create.ps1` | PowerShell 7 | `scripts/windows/pi-sandbox-create.ps1` | Public forwarding wrapper for Windows creator. | User/PowerShell |
 | `pi-sandbox-run.ps1` | PowerShell 7 | `scripts/windows/pi-sandbox-run.ps1` | Public forwarding wrapper for Windows runner. | User/PowerShell |
 

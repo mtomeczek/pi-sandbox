@@ -1,8 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
-SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+canonical_existing_path() {
+    local path="$1" directory name link
+
+    case "$path" in
+        /*) ;;
+        *) path="$PWD/$path" ;;
+    esac
+    while [[ -L "$path" ]]; do
+        directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+        link="$(readlink "$path")" || return 1
+        case "$link" in
+            /*) path="$link" ;;
+            *) path="$directory/$link" ;;
+        esac
+    done
+    [[ -e "$path" ]] || return 1
+    directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+    name="$(basename "$path")"
+    printf '%s/%s\n' "$directory" "$name"
+}
+
+SCRIPT_PATH="$(canonical_existing_path "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-setup.md"
 XDG_BIN_HOME="${XDG_BIN_HOME:-${HOME}/.local/bin}"
 COMMANDS=(pi-sandbox-create pi-sandbox-run pi-sandbox-setup)
@@ -27,11 +48,11 @@ usage() {
 resolve_link_target() {
     local link="$1" target
 
-    target="$(readlink -- "$link")" || return 1
+    target="$(readlink "$link")" || return 1
     if [[ "$target" != /* ]]; then
-        target="$(dirname -- "$link")/$target"
+        target="$(dirname "$link")/$target"
     fi
-    realpath -m -- "$target"
+    canonical_existing_path "$target"
 }
 
 validate_bin_directory() {
@@ -63,17 +84,17 @@ install_links() {
                 return 1
             }
             [[ "$existing" == "$target" ]] || {
-                err "Refusing to replace unrelated symlink: $destination -> $(readlink -- "$destination")"
+                err "Refusing to replace unrelated symlink: $destination -> $(readlink "$destination")"
                 return 1
             }
         fi
     done
 
-    mkdir -p -- "$XDG_BIN_HOME"
+    mkdir -p "$XDG_BIN_HOME"
     for command in "${COMMANDS[@]}"; do
         target="${SCRIPT_DIR}/${command}"
         destination="${XDG_BIN_HOME}/${command}"
-        ln -sfn -- "$target" "$destination"
+        ln -sfn "$target" "$destination"
         printf 'Installed: %s -> %s\n' "$destination" "$target"
     done
 
@@ -104,10 +125,10 @@ remove_links() {
             continue
         }
         [[ "$existing" == "$target" ]] || {
-            warn "Not removing unrelated symlink: $destination -> $(readlink -- "$destination")"
+            warn "Not removing unrelated symlink: $destination -> $(readlink "$destination")"
             continue
         }
-        rm -- "$destination"
+        rm "$destination"
         printf 'Removed: %s\n' "$destination"
     done
 }

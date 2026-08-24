@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(realpath -e -- "$(dirname -- "${BASH_SOURCE[0]}")/..")"
+ROOT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${ROOT_DIR}/test-allowed-roots.XXXXXX")"
-trap 'rm -rf -- "$WORK_DIR"' EXIT
+trap 'rm -rf "$WORK_DIR"' EXIT
 
 CONFIG_HOME="${WORK_DIR}/config"
 ALLOWED_ROOT="${WORK_DIR}/allowed-root"

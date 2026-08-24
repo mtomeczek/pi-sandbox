@@ -9,7 +9,7 @@ The project is split into two roles:
 
 ## Requirements
 
-- Bash
+- Bash (including macOS's bundled Bash 3.2)
 - Rootless Podman
 - Working subordinate UID/GID mappings for rootless `keep-id` containers
 - Network access during image builds
@@ -60,6 +60,19 @@ This creates a profile manifest and builds:
 ```text
 pi-sandbox-rust:latest
 ```
+
+### macOS
+
+The standard Bash commands are the macOS version; no separate launcher is required. They support the stock Bash 3.2 and BSD userland, including symlinked installation through `pi-sandbox-setup`. Start a Podman machine before creating or running sandboxes:
+
+```bash
+podman machine init  # first use only
+podman machine start
+./pi-sandbox-create --create rust --tool rust@1.90.0
+./pi-sandbox-run rust
+```
+
+See [macOS documentation](docs/pi-sandbox-macos.md) for configuration and validation details.
 
 ### Windows PowerShell 7
 
@@ -310,9 +323,10 @@ Help text is externalized as Markdown:
 docs/pi-sandbox-run.md
 docs/pi-sandbox-create.md
 docs/pi-sandbox-setup.md
+docs/release-policy.md
 ```
 
-`-h` and `--help` print the corresponding Markdown file.
+`-h` and `--help` print the corresponding Markdown file. The [release and compatibility policy](docs/release-policy.md) defines supported Podman versions and image-default update requirements.
 
 ## Development checks
 
@@ -335,6 +349,14 @@ Run the setup safety regression test:
 ```bash
 bash tests/setup.sh
 bash tests/allowed-roots.sh
+bash tests/macos-compat.sh
+bash tests/release-policy.sh
+```
+
+Run ShellCheck locally when available (the GitHub Actions workflow installs it automatically):
+
+```bash
+shellcheck --shell=bash --severity=warning pi-sandbox-create pi-sandbox-run pi-sandbox-setup tests/*.sh
 ```
 
 Validate the Windows PowerShell launchers and their help contracts:
