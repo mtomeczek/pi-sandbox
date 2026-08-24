@@ -282,7 +282,14 @@ write_containerfile() {
     for spec in "${EXTENSION_SPECS[@]}"; do
         case "$spec" in
           uv:*) append_snippet "$snippets" extension-uv "PACKAGE=${spec#uv:}" ;;
-          cargo:*) local ext="${spec#cargo:}" crate="${ext%%@*}" version_arg=""; [[ "$ext" == *@* ]] && version_arg="--version ${ext#*@}"; append_snippet "$snippets" extension-cargo "CRATE=$crate" "VERSION_ARG=$version_arg" ;;
+          cargo:*)
+              local ext crate version_arg
+              ext="${spec#cargo:}"
+              crate="${ext%%@*}"
+              version_arg=""
+              [[ "$ext" == *@* ]] && version_arg="--version ${ext#*@}"
+              append_snippet "$snippets" extension-cargo "CRATE=$crate" "VERSION_ARG=$version_arg"
+              ;;
           rustup:*) append_snippet "$snippets" extension-rustup "COMPONENT=${spec#rustup:}" ;;
           fnm:node@*) append_snippet "$snippets" extension-fnm-node "VERSION=${spec#fnm:node@}" ;;
         esac
