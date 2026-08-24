@@ -1,0 +1,547 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+canonical_existing_path() {
+    local path="$1" directory name link
+
+    case "$path" in
+        /*) ;;
+        *) path="$PWD/$path" ;;
+    esac
+    while [[ -L "$path" ]]; do
+        directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+        link="$(readlink "$path")" || return 1
+        case "$link" in
+            /*) path="$link" ;;
+            *) path="$directory/$link" ;;
+        esac
+    done
+    [[ -e "$path" ]] || return 1
+    directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+    name="$(basename "$path")"
+    printf '%s/%s\n' "$directory" "$name"
+}
+
+SCRIPT_PATH="$(canonical_existing_path "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-run.md"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
+CONFIG_FILE="${CONFIG_DIR}/config"
+ALLOWED_ROOTS_FILE="${CONFIG_DIR}/allowed-roots"
+CONFIG_TEMPLATE="${SCRIPT_DIR}/templates/run.config.template"
+ALLOWED_ROOTS_TEMPLATE="${SCRIPT_DIR}/templates/allowed-roots.template"
+
+IMAGE="pi-sandbox:latest"
+CONTAINER_USER="pi"
+CONTAINER_UID=1000
+CONTAINER_GID=1000
+CONTAINER_HOME="/home/pi"
+CONTAINER_START_DIR=""
+AGENT_VOLUME="pi-agent"
+MEMORY=""
+CPUS=""
+PIDS_LIMIT=512
+ENV_FILE=""
+NETWORK_MODE="default"
+VERBOSE=0
+
+PROFILE=""
+INSTANCE_NAME=""
+HOST_WORKSPACE=""
+SHELL_MODE=0
+DRY_RUN=0
+SHOW_INFO=0
+SHOW_STATE=0
+RESET_STATE=0
+YES=0
+STATE_VOLUME_SET=0
+EXTRA_MOUNTS=()
+ALLOWED_ROOTS=()
+PI_ARGS=()
+
+usage() {
+    if [[ -r "$HELP_FILE" ]]; then
+        cat "$HELP_FILE"
+    else
+        printf 'Error: help file not found: %s\n' "$HELP_FILE" >&2
+        return 1
+    fi
+}
+
+err() {
+    printf 'Error: %s\n' "$*" >&2
+}
+
+warn() {
+    printf 'Warning: %s\n' "$*" >&2
+}
+
+log() {
+    printf '==> %s\n' "$*"
+}
+
+shell_join() {
+    local out="" q arg
+
+    for arg in "$@"; do
+        printf -v q '%q' "$arg"
+        out+="${out:+ }${q}"
+    done
+    printf '%s\n' "$out"
+}
+
+run_cmd() {
+    if (( VERBOSE || DRY_RUN )); then
+        printf '+ '
+        shell_join "$@"
+    fi
+    (( DRY_RUN )) && return 0
+    "$@"
+}
+
+trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+render_template() {
+    local template="$1" output="$2" content key value
+    shift 2
+    [[ -r "$template" ]] || { err "Template not found: $template"; return 1; }
+    content="$(<"$template")"
+    while (($#)); do
+        key="${1%%=*}"; value="${1#*=}"
+        content="${content//\{\{$key\}\}/$value}"
+        shift
+    done
+    printf '%s\n' "$content" > "$output"
+}
+
+write_default_config() {
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    render_template "$CONFIG_TEMPLATE" "$CONFIG_FILE" \
+        "CONTAINER_USER=$CONTAINER_USER" "CONTAINER_UID=$CONTAINER_UID" "CONTAINER_GID=$CONTAINER_GID" \
+        "CONTAINER_HOME=$CONTAINER_HOME" "STATE_VOLUME=$AGENT_VOLUME" "MEMORY=$MEMORY" "CPUS=$CPUS" \
+        "PIDS_LIMIT=$PIDS_LIMIT" "ENV_FILE=$ENV_FILE" "NETWORK_MODE=$NETWORK_MODE" "VERBOSE=$VERBOSE"
+}
+
+write_default_allowed_roots() {
+    local default_root="${HOME}/src"
+
+    mkdir -p "$(dirname "$ALLOWED_ROOTS_FILE")"
+    if [[ ! -e "$default_root" ]]; then
+        mkdir -p "$default_root"
+    fi
+    [[ -d "$default_root" && ! -L "$default_root" ]] || {
+        err "Default allowed root must be a non-symlinked directory: $default_root"
+        exit 1
+    }
+    [[ -r "$ALLOWED_ROOTS_TEMPLATE" ]] || { err "Template not found: $ALLOWED_ROOTS_TEMPLATE"; exit 1; }
+    render_template "$ALLOWED_ROOTS_TEMPLATE" "$ALLOWED_ROOTS_FILE" "DEFAULT_ROOT=$default_root"
+}
+
+load_allowed_roots() {
+    [[ -f "$ALLOWED_ROOTS_FILE" ]] || write_default_allowed_roots
+
+    local line entry canonical component existing lineno=0 duplicate
+    local -a components
+    ALLOWED_ROOTS=()
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((++lineno))
+        entry="$(trim "$line")"
+        [[ -z "$entry" || "$entry" == \#* ]] && continue
+        [[ "$entry" == /* ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Allowed root must be an absolute path: $entry"; exit 2; }
+        while [[ "$entry" != "/" && "$entry" == */ ]]; do entry="${entry%/}"; done
+        [[ "$entry" != "/" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Filesystem root is not an allowed root"; exit 2; }
+        [[ "$entry" != *"//"* ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Empty path component: $entry"; exit 2; }
+
+        IFS='/' read -r -a components <<< "${entry#/}"
+        for component in "${components[@]}"; do
+            [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || {
+                err "$ALLOWED_ROOTS_FILE:$lineno: Path traversal is not allowed: $entry"
+                exit 2
+            }
+            [[ "$component" != .* ]] || {
+                err "$ALLOWED_ROOTS_FILE:$lineno: Hidden directory is not allowed: $entry"
+                exit 2
+            }
+        done
+
+        [[ -e "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Directory does not exist: $entry"; exit 2; }
+        [[ -d "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Entry is not a directory: $entry"; exit 2; }
+        [[ ! -L "$entry" ]] || { err "$ALLOWED_ROOTS_FILE:$lineno: Symbolic link is not allowed: $entry"; exit 2; }
+        canonical="$(canonical_existing_path "$entry")" || { err "$ALLOWED_ROOTS_FILE:$lineno: Cannot resolve: $entry"; exit 2; }
+        [[ "$canonical" == "$entry" ]] || {
+            err "$ALLOWED_ROOTS_FILE:$lineno: Allowed root contains a symbolic link: $entry"
+            exit 2
+        }
+
+        duplicate=0
+        for existing in "${ALLOWED_ROOTS[@]}"; do
+            if [[ "$existing" == "$canonical" ]]; then duplicate=1; fi
+        done
+        if (( ! duplicate )); then ALLOWED_ROOTS+=("$canonical"); fi
+    done < "$ALLOWED_ROOTS_FILE"
+}
+
+load_config() {
+    [[ -f "$CONFIG_FILE" ]] || { write_default_config; return 0; }
+    local line key value lineno=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((++lineno))
+        line="$(trim "$line")"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == *=* ]] || { err "$CONFIG_FILE:$lineno: expected KEY=VALUE"; exit 2; }
+        key="$(trim "${line%%=*}")"; value="$(trim "${line#*=}")"
+        if [[ "$value" == \"*\" && "$value" == *\" ]]; then value="${value:1:${#value}-2}"; fi
+        if [[ "$value" == \'*\' && "$value" == *\' ]]; then value="${value:1:${#value}-2}"; fi
+        case "$key" in
+            IMAGE) IMAGE="$value" ;;
+            CONTAINER_USER) CONTAINER_USER="$value" ;;
+            CONTAINER_UID) CONTAINER_UID="$value" ;;
+            CONTAINER_GID) CONTAINER_GID="$value" ;;
+            CONTAINER_HOME) CONTAINER_HOME="$value" ;;
+            STATE_VOLUME|AGENT_VOLUME) AGENT_VOLUME="$value" ;;
+            MEMORY) MEMORY="$value" ;;
+            CPUS) CPUS="$value" ;;
+            PIDS_LIMIT) PIDS_LIMIT="$value" ;;
+            ENV_FILE) ENV_FILE="$value" ;;
+            NETWORK_MODE) NETWORK_MODE="$value" ;;
+            MOUNT) EXTRA_MOUNTS+=("$value") ;;
+            VERBOSE) [[ "$value" =~ ^(1|true|yes)$ ]] && VERBOSE=1 ;;
+            BASE_IMAGE|PI_VERSION|PROFILE_DIR) : ;;
+            *) err "$CONFIG_FILE:$lineno: unsupported config key '$key'"; exit 2 ;;
+        esac
+    done < "$CONFIG_FILE"
+}
+
+require_podman() {
+    command -v podman >/dev/null 2>&1 || { err "Podman is not installed or not in PATH"; exit 1; }
+    (( DRY_RUN )) && return 0
+    podman info >/dev/null 2>&1 || { err "Podman is installed but 'podman info' failed"; exit 1; }
+}
+
+confirm() {
+    (( YES )) && return 0
+    [[ -t 0 ]] || { err "$1 requires confirmation; rerun with --yes"; return 1; }
+    local answer
+    read -r -p "$1 [y/N] " answer
+    [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+VALIDATED_PATH=""
+
+# Validate only the directory selected as the bind source and the components of
+# its path. Contents below that directory are deliberately not inspected; they
+# may contain hidden entries, files, or symbolic links.
+validate_host_directory() {
+    local source="$1" description="$2" root relative component canonical allowed_roots_display
+    local -a components
+
+    if [[ "$source" == ./* ]]; then
+        source="${PWD%/}/${source#./}"
+    elif [[ "$source" != /* ]]; then
+        err "$description must be an absolute path or start with './': $source"
+        return 1
+    fi
+    [[ "$source" != "/" ]] || { err "$description cannot be the filesystem root"; return 1; }
+
+    # A trailing slash is harmless; all other non-canonical syntax is rejected.
+    while [[ "$source" != "/" && "$source" == */ ]]; do source="${source%/}"; done
+    [[ "$source" != *"//"* ]] || { err "$description contains an empty path component: $source"; return 1; }
+
+    if [[ ! -e "$source" ]]; then
+        err "$description does not exist: $source"
+        return 1
+    fi
+    [[ -d "$source" ]] || { err "$description must be a directory, not a file: $source"; return 1; }
+    [[ ! -L "$source" ]] || { err "$description cannot be a symbolic link: $source"; return 1; }
+
+    canonical="$(canonical_existing_path "$source")" || { err "Cannot resolve $description: $source"; return 1; }
+    [[ "$canonical" == "$source" ]] || {
+        err "$description must not contain symbolic links, '.' or '..': $source"
+        return 1
+    }
+    relative=""
+    for root in "${ALLOWED_ROOTS[@]}"; do
+        if [[ "$canonical" == "$root/"* ]]; then
+            relative="${canonical#"$root/"}"
+            break
+        fi
+    done
+    if [[ -z "$relative" ]]; then
+        if ((${#ALLOWED_ROOTS[@]})); then
+            allowed_roots_display="$(printf '%s, ' "${ALLOWED_ROOTS[@]}")"
+            allowed_roots_display="${allowed_roots_display%, }"
+        else
+            allowed_roots_display="none configured"
+        fi
+        err "$description must be below an allowed root ($allowed_roots_display): $canonical"
+        return 1
+    fi
+
+    IFS='/' read -r -a components <<< "$relative"
+    for component in "${components[@]}"; do
+        [[ -n "$component" ]] || { err "$description contains an empty path component: $canonical"; return 1; }
+        [[ "$component" != "." && "$component" != ".." ]] || {
+            err "$description contains path traversal: $canonical"
+            return 1
+        }
+        [[ "$component" != .* ]] || {
+            err "$description contains hidden directory '.${component#.}': $canonical"
+            return 1
+        }
+    done
+
+    VALIDATED_PATH="$canonical"
+}
+
+validate_container_mountpoint() {
+    local target="$1" component
+    local -a components
+
+    [[ "$target" == /* ]] || { err "Mount destination must be an absolute path: $target"; return 1; }
+    [[ "$target" != "/" ]] || { err "Mount destination cannot be the container root"; return 1; }
+    [[ "$target" != *"//"* ]] || { err "Mount destination contains an empty path component: $target"; return 1; }
+
+    IFS='/' read -r -a components <<< "${target#/}"
+    for component in "${components[@]}"; do
+        [[ -n "$component" ]] || { err "Mount destination contains an empty path component: $target"; return 1; }
+        [[ "$component" != "." && "$component" != ".." ]] || {
+            err "Mount destination contains path traversal: $target"
+            return 1
+        }
+        [[ "$component" != .* ]] || {
+            err "Mount destination contains a hidden directory: $target"
+            return 1
+        }
+    done
+}
+
+resolve_workspace() {
+    local workspace_name
+
+    HOST_WORKSPACE="${HOST_WORKSPACE:-$PWD}"
+    validate_host_directory "$HOST_WORKSPACE" "workspace" || return 1
+    HOST_WORKSPACE="$VALIDATED_PATH"
+    workspace_name="${HOST_WORKSPACE##*/}"
+    CONTAINER_START_DIR="${CONTAINER_HOME%/}/${workspace_name}"
+    validate_container_mountpoint "$CONTAINER_START_DIR" || return 1
+}
+
+validate_mount_spec() {
+    local spec="$1" source remainder target options=""
+
+    [[ "$spec" == *:* ]] || { err "Invalid --mount '$spec'; expected HOST:CONTAINER[:ro|rw]"; return 1; }
+    source="${spec%%:*}"
+    remainder="${spec#*:}"
+    target="${remainder%%:*}"
+    if [[ "$remainder" == *:* ]]; then
+        options="${remainder#*:}"
+        [[ "$options" != *:* ]] || { err "Invalid --mount options in '$spec'"; return 1; }
+        [[ "$options" == "ro" || "$options" == "rw" ]] || {
+            err "Mount options must be 'ro' or 'rw': $spec"
+            return 1
+        }
+    fi
+
+    validate_host_directory "$source" "mount source" || return 1
+    source="$VALIDATED_PATH"
+    validate_container_mountpoint "$target" || return 1
+    VALIDATED_PATH="${source}:${target}${options:+:${options}}"
+}
+
+if [[ $# -eq 1 && ( ${1:-} == "--help" || ${1:-} == "-h" ) ]]; then
+    usage
+    exit 0
+fi
+
+# Find --config before loading configuration so CLI can select another file.
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+    if [[ "${args[i]}" == "--config" ]]; then
+        (( i + 1 < ${#args[@]} )) || { err "--config requires FILE"; exit 2; }
+        CONFIG_FILE="${args[i+1]}"
+        ALLOWED_ROOTS_FILE="$(dirname "$CONFIG_FILE")/allowed-roots"
+    fi
+done
+
+load_config
+load_allowed_roots
+
+if [[ $# -gt 0 && "$1" != -* ]]; then
+    PROFILE="$1"
+    shift
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --) shift; PI_ARGS+=("$@"); break ;;
+        --name) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; INSTANCE_NAME="$2"; shift ;;
+        --workspace) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; HOST_WORKSPACE="$2"; shift ;;
+        --mount) [[ $# -ge 2 ]] || { err "$1 requires SPEC"; exit 2; }; EXTRA_MOUNTS+=("$2"); shift ;;
+        --env-file) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; ENV_FILE="$2"; shift ;;
+        --state-volume) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; AGENT_VOLUME="$2"; STATE_VOLUME_SET=1; shift ;;
+        --memory) [[ $# -ge 2 ]] || { err "$1 requires SIZE"; exit 2; }; MEMORY="$2"; shift ;;
+        --cpus) [[ $# -ge 2 ]] || { err "$1 requires NUMBER"; exit 2; }; CPUS="$2"; shift ;;
+        --pids-limit) [[ $# -ge 2 ]] || { err "$1 requires NUMBER"; exit 2; }; PIDS_LIMIT="$2"; shift ;;
+        --no-network) NETWORK_MODE="none" ;;
+        --shell) SHELL_MODE=1 ;;
+        --image) [[ $# -ge 2 ]] || { err "$1 requires IMAGE"; exit 2; }; IMAGE="$2"; PROFILE=""; shift ;;
+        --show-state) SHOW_STATE=1 ;;
+        --reset-state) RESET_STATE=1 ;;
+        --info) SHOW_INFO=1 ;;
+        --dry-run) DRY_RUN=1 ;;
+        --verbose|--debug) VERBOSE=1 ;;
+        --yes|-y) YES=1 ;;
+        --config) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; CONFIG_FILE="$2"; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *)
+            if [[ "$1" != -* && -z "$PROFILE" ]]; then
+                PROFILE="$1"
+            else
+                err "Unknown option: $1"; usage >&2; exit 2
+            fi
+            ;;
+    esac
+    shift
+done
+
+[[ -z "$PROFILE" || "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid profile name '$PROFILE'"; exit 2; }
+[[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid sandbox name '$INSTANCE_NAME'"; exit 2; }
+[[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "Container UID must be numeric"; exit 2; }
+[[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "Container GID must be numeric"; exit 2; }
+[[ "$PIDS_LIMIT" =~ ^[0-9]+$ ]] || { err "PIDs limit must be numeric"; exit 2; }
+[[ "$CONTAINER_HOME" == /* ]] || { err "Container home must be an absolute path"; exit 2; }
+
+if [[ -n "$PROFILE" ]]; then
+    IMAGE="pi-sandbox-${PROFILE}:latest"
+    (( STATE_VOLUME_SET )) || AGENT_VOLUME="pi-agent-${PROFILE}${INSTANCE_NAME:+-${INSTANCE_NAME}}"
+elif [[ "$AGENT_VOLUME" == "pi-agent" && -n "$INSTANCE_NAME" && $STATE_VOLUME_SET -eq 0 ]]; then
+    AGENT_VOLUME="pi-agent-${INSTANCE_NAME}"
+fi
+
+require_podman
+
+if (( SHOW_INFO )); then
+    resolve_workspace || exit 2
+    echo "Pi-sandbox runtime configuration"
+    printf '  profile:             %s\n' "${PROFILE:-default}"
+    printf '  image:               %s\n' "$IMAGE"
+    printf '  container user:      %s (%s:%s)\n' "$CONTAINER_USER" "$CONTAINER_UID" "$CONTAINER_GID"
+    printf '  container start dir: %s\n' "$CONTAINER_START_DIR"
+    printf '  host start dir:      %s\n' "${HOST_WORKSPACE:-$PWD}"
+    printf '  state volume:        %s\n' "$AGENT_VOLUME"
+    printf '  network:             %s\n' "$NETWORK_MODE"
+    printf '  extra mounts:        %s\n' "${EXTRA_MOUNTS[*]:-none}"
+    printf '  allowed-roots file:  %s\n' "$ALLOWED_ROOTS_FILE"
+    printf '  allowed roots:       %s\n' "${ALLOWED_ROOTS[*]:-none}"
+    if command -v podman >/dev/null 2>&1 && podman image exists "$IMAGE" 2>/dev/null; then
+        printf '  image status:        present\n'
+    else
+        printf '  image status:        missing\n'
+    fi
+    exit 0
+fi
+
+if (( SHOW_STATE )); then
+    if (( DRY_RUN )); then
+        echo "+ podman volume inspect $(printf '%q' "$AGENT_VOLUME")"
+        exit 0
+    fi
+    if podman volume exists "$AGENT_VOLUME"; then
+        podman volume inspect "$AGENT_VOLUME"
+    else
+        echo "State volume '$AGENT_VOLUME' does not exist."
+    fi
+    exit 0
+fi
+
+if (( RESET_STATE )); then
+    if (( DRY_RUN )); then
+        echo "+ podman volume rm $(printf '%q' "$AGENT_VOLUME")"
+        exit 0
+    fi
+    if podman volume exists "$AGENT_VOLUME"; then
+        confirm "Remove Pi state volume '$AGENT_VOLUME'? This deletes saved state." || exit 1
+        run_cmd podman volume rm "$AGENT_VOLUME" >/dev/null
+        echo "Removed state volume '$AGENT_VOLUME'."
+    else
+        echo "State volume '$AGENT_VOLUME' does not exist."
+    fi
+    exit 0
+fi
+
+if (( DRY_RUN )); then
+    echo "# Require existing image: $IMAGE"
+elif ! podman image exists "$IMAGE"; then
+    err "Sandbox image '$IMAGE' does not exist"
+    err "Ask an administrator to create it with: pi-sandbox-create${PROFILE:+ $PROFILE} --build"
+    exit 1
+fi
+
+resolve_workspace || exit 2
+
+VALIDATED_MOUNTS=()
+for mount in "${EXTRA_MOUNTS[@]}"; do
+    validate_mount_spec "$mount" || exit 2
+    VALIDATED_MOUNTS+=("$VALIDATED_PATH")
+done
+
+if (( ! DRY_RUN )) && ! podman volume exists "$AGENT_VOLUME"; then
+    log "Creating Pi state volume: $AGENT_VOLUME"
+    run_cmd podman volume create "$AGENT_VOLUME" >/dev/null
+elif (( DRY_RUN )); then
+    echo "# Ensure state volume exists: $AGENT_VOLUME"
+fi
+
+RUN_ARGS=(
+    --rm --interactive --tty
+    --userns="keep-id:uid=${CONTAINER_UID},gid=${CONTAINER_GID}"
+    --cap-drop=ALL
+    --security-opt=no-new-privileges
+    --pids-limit="$PIDS_LIMIT"
+    --env "HOME=${CONTAINER_HOME}"
+    --env "USER=${CONTAINER_USER}"
+    --env "XDG_CONFIG_HOME=${CONTAINER_HOME}/.config"
+    --env "XDG_DATA_HOME=${CONTAINER_HOME}/.local/share"
+    --env "XDG_CACHE_HOME=${CONTAINER_HOME}/.cache"
+    --env "XDG_STATE_HOME=${CONTAINER_HOME}/.local/state"
+    --env "XDG_BIN_HOME=${CONTAINER_HOME}/.local/bin"
+    --volume "${HOST_WORKSPACE}:${CONTAINER_START_DIR}:rw"
+    --volume "${AGENT_VOLUME}:${CONTAINER_HOME}/.pi/agent:rw"
+    --workdir "$CONTAINER_START_DIR"
+)
+
+[[ -n "$MEMORY" ]] && RUN_ARGS+=(--memory "$MEMORY")
+[[ -n "$CPUS" ]] && RUN_ARGS+=(--cpus "$CPUS")
+[[ "$NETWORK_MODE" == "none" ]] && RUN_ARGS+=(--network=none --env PI_OFFLINE=1)
+
+for mount in "${VALIDATED_MOUNTS[@]}"; do
+    RUN_ARGS+=(--volume "$mount")
+done
+
+if [[ -n "$ENV_FILE" ]]; then
+    [[ -r "$ENV_FILE" ]] || { err "Environment file is not readable: $ENV_FILE"; exit 1; }
+    RUN_ARGS+=(--env-file "$ENV_FILE")
+fi
+
+for var in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; do
+    [[ -n "${!var:-}" ]] && RUN_ARGS+=(--env "$var")
+done
+
+log "Starting Pi sandbox"
+echo "    image:     $IMAGE"
+echo "    start dir:  $HOST_WORKSPACE -> $CONTAINER_START_DIR"
+echo "    state:     $AGENT_VOLUME"
+echo "    network:   $NETWORK_MODE"
+
+if (( SHELL_MODE )); then
+    run_cmd podman run "${RUN_ARGS[@]}" --entrypoint /bin/bash "$IMAGE"
+else
+    run_cmd podman run "${RUN_ARGS[@]}" "$IMAGE" "${PI_ARGS[@]}"
+fi

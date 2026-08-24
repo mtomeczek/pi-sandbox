@@ -1,0 +1,6 @@
+# pi-sandbox allowed bind-mount roots
+# One absolute directory path per line. Edit this file by hand.
+# The listed roots must exist and must not contain hidden, '.', '..', or
+# symbolic-link path components. A mounted directory must be below a root;
+# the root directory itself cannot be mounted.
+{{DEFAULT_ROOT}}

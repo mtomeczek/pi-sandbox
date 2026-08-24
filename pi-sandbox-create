@@ -1,0 +1,458 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+canonical_existing_path() {
+    local path="$1" directory name link
+
+    case "$path" in
+        /*) ;;
+        *) path="$PWD/$path" ;;
+    esac
+    while [[ -L "$path" ]]; do
+        directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+        link="$(readlink "$path")" || return 1
+        case "$link" in
+            /*) path="$link" ;;
+            *) path="$directory/$link" ;;
+        esac
+    done
+    [[ -e "$path" ]] || return 1
+    directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+    name="$(basename "$path")"
+    printf '%s/%s\n' "$directory" "$name"
+}
+
+SCRIPT_PATH="$(canonical_existing_path "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-create.md"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
+CONFIG_FILE="${CONFIG_DIR}/config"
+PROFILES_DIR="${CONFIG_DIR}/profiles"
+CONTAINERFILE_DIR="${CONFIG_DIR}/dockerfiles"
+CONTAINERFILE_TEMPLATE="${SCRIPT_DIR}/templates/Containerfile.pi-sandbox.template"
+SNIPPET_TEMPLATE="${SCRIPT_DIR}/templates/Containerfile.snippets.template"
+CONFIG_TEMPLATE="${SCRIPT_DIR}/templates/create.config.template"
+PROFILE_MANIFEST_TEMPLATE="${SCRIPT_DIR}/templates/profile.template"
+
+IMAGE="pi-sandbox:latest"
+BASE_IMAGE="node:24-bookworm-slim"
+PI_VERSION="0.84.2"
+CONTAINER_USER="pi"
+CONTAINER_UID=1000
+CONTAINER_GID=1000
+VERBOSE=0
+
+PROFILE=""
+PROFILE_FILE=""
+CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox"
+CREATE_PROFILE=0
+BUILD=0
+UPDATE=0
+NO_CACHE=0
+PULL=0
+REGENERATE_CONTAINERFILE=0
+DRY_RUN=0
+SHOW_INFO=0
+CLEAN_IMAGE=0
+YES=0
+TOOL_SPECS=()
+EXTENSION_SPECS=()
+NPM_SPECS=()
+MANIFEST_ENVS=()
+MANIFEST_PATHS=()
+MANIFEST_APT=()
+
+usage() {
+    if [[ -r "$HELP_FILE" ]]; then
+        cat "$HELP_FILE"
+    else
+        printf 'Error: help file not found: %s\n' "$HELP_FILE" >&2
+        return 1
+    fi
+}
+
+err() {
+    printf 'Error: %s\n' "$*" >&2
+}
+
+log() {
+    printf '==> %s\n' "$*"
+}
+
+shell_join() {
+    local out="" q arg
+
+    for arg in "$@"; do
+        printf -v q '%q' "$arg"
+        out+="${out:+ }${q}"
+    done
+    printf '%s\n' "$out"
+}
+
+run_cmd() {
+    if (( VERBOSE || DRY_RUN )); then
+        printf '+ '
+        shell_join "$@"
+    fi
+    (( DRY_RUN )) && return 0
+    "$@"
+}
+
+trim() {
+    local s="$1"
+
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+tool_known() {
+    case "$1" in
+        go|rust|jvm|uv|fnm|python) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_npm_spec() {
+    local spec="$1"
+    [[ "$spec" =~ ^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._+~-]*)?$ ]] || {
+        err "Invalid npm package '$spec' (expected PACKAGE[@VERSION])"
+        return 1
+    }
+}
+
+render_template() {
+    local template="$1" output="$2" content key value
+    shift 2
+    [[ -r "$template" ]] || { err "Template not found: $template"; return 1; }
+    content="$(<"$template")"
+    while (($#)); do
+        key="${1%%=*}"; value="${1#*=}"
+        content="${content//\{\{$key\}\}/$value}"
+        shift
+    done
+    printf '%s\n' "$content" > "$output"
+}
+
+append_snippet() {
+    local output="$1" name="$2" content key value
+    shift 2
+    [[ -r "$SNIPPET_TEMPLATE" ]] || { err "Snippet template not found: $SNIPPET_TEMPLATE"; return 1; }
+    content="$(awk -v name="$name" '$0 == "@@ " name { found=1; next } /^@@ / { if (found) exit } found { print }' "$SNIPPET_TEMPLATE")"
+    [[ -n "$content" ]] || { err "Snippet not found: $name"; return 1; }
+    while (($#)); do
+        key="${1%%=*}"; value="${1#*=}"
+        content="${content//\{\{$key\}\}/$value}"
+        shift
+    done
+    printf '%s\n' "$content" >> "$output"
+}
+
+write_default_config() {
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    render_template "$CONFIG_TEMPLATE" "$CONFIG_FILE" \
+        "IMAGE=$IMAGE" "BASE_IMAGE=$BASE_IMAGE" "PI_VERSION=$PI_VERSION" \
+        "CONTAINER_USER=$CONTAINER_USER" "CONTAINER_UID=$CONTAINER_UID" "CONTAINER_GID=$CONTAINER_GID"
+}
+
+load_config() {
+    [[ -f "$CONFIG_FILE" ]] || { write_default_config; return 0; }
+    local line key value lineno=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((++lineno)); line="$(trim "$line")"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == *=* ]] || { err "$CONFIG_FILE:$lineno: Expected KEY=VALUE"; exit 2; }
+        key="$(trim "${line%%=*}")"; value="$(trim "${line#*=}")"
+        if [[ "$value" == \"*\" && "$value" == *\" ]]; then value="${value:1:${#value}-2}"; fi
+        if [[ "$value" == \'*\' && "$value" == *\' ]]; then value="${value:1:${#value}-2}"; fi
+        case "$key" in
+            IMAGE) IMAGE="$value" ;;
+            BASE_IMAGE) BASE_IMAGE="$value" ;;
+            PI_VERSION) PI_VERSION="$value" ;;
+            CONTAINER_USER) CONTAINER_USER="$value" ;;
+            CONTAINER_UID) CONTAINER_UID="$value" ;;
+            CONTAINER_GID) CONTAINER_GID="$value" ;;
+            PROFILE_DIR) : ;;
+            VERBOSE) [[ "$value" =~ ^(1|true|yes)$ ]] && VERBOSE=1 ;;
+            CONTAINER_HOME|STATE_VOLUME|AGENT_VOLUME|MEMORY|CPUS|PIDS_LIMIT|ENV_FILE|NETWORK_MODE|MOUNT) : ;;
+            *) err "$CONFIG_FILE:$lineno: Unsupported config key '$key'"; exit 2 ;;
+        esac
+    done < "$CONFIG_FILE"
+}
+
+validate_profile_name() {
+    [[ -z "$PROFILE" || "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid profile name '$PROFILE'"; exit 2; }
+}
+
+write_manifest() {
+    PROFILE_FILE="${PROFILES_DIR}/${PROFILE}.profile"
+    if (( DRY_RUN )); then
+        echo "+ write manifest $(printf '%q' "$PROFILE_FILE") with preamble $(printf '%q' "$PROFILE_MANIFEST_TEMPLATE")"
+        return 0
+    fi
+    [[ -r "$PROFILE_MANIFEST_TEMPLATE" ]] || { err "Profile manifest template not found: $PROFILE_MANIFEST_TEMPLATE"; exit 1; }
+    mkdir -p "$PROFILES_DIR"
+    {
+        cat "$PROFILE_MANIFEST_TEMPLATE"
+        echo
+        echo "# pi-sandbox image manifest: ${PROFILE}"
+        echo "# Generated $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "PROFILE=${PROFILE}"
+        echo "BASE_IMAGE=${BASE_IMAGE}"
+        echo "PI_VERSION=${PI_VERSION}"
+        for spec in "${TOOL_SPECS[@]}"; do echo "TOOL=${spec}"; done
+        for spec in "${EXTENSION_SPECS[@]}"; do echo "EXTENSION=${spec}"; done
+        for spec in "${NPM_SPECS[@]}"; do echo "NPM=${spec}"; done
+        for spec in "${MANIFEST_ENVS[@]}"; do echo "ENV=${spec}"; done
+        for spec in "${MANIFEST_PATHS[@]}"; do echo "PATH=${spec}"; done
+        for spec in "${MANIFEST_APT[@]}"; do echo "APT=${spec}"; done
+    } > "$PROFILE_FILE"
+    log "Wrote manifest $PROFILE_FILE"
+}
+
+load_manifest() {
+    [[ -n "$PROFILE" ]] || return 0
+    PROFILE_FILE="${PROFILES_DIR}/${PROFILE}.profile"
+    [[ -f "$PROFILE_FILE" ]] || { err "Profile '$PROFILE' does not exist ($PROFILE_FILE)"; exit 1; }
+    TOOL_SPECS=(); EXTENSION_SPECS=(); NPM_SPECS=(); MANIFEST_ENVS=(); MANIFEST_PATHS=(); MANIFEST_APT=()
+    local line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="$(trim "$line")"; [[ -z "$line" || "$line" == \#* ]] && continue
+        key="${line%%=*}"; value="${line#*=}"
+        case "$key" in
+            PROFILE) : ;;
+            BASE_IMAGE) BASE_IMAGE="$value" ;;
+            PI_VERSION) PI_VERSION="$value" ;;
+            PROJECT_NODE) EXTENSION_SPECS+=("fnm:node@$value") ;;
+            TOOL) TOOL_SPECS+=("$value") ;;
+            EXTENSION) EXTENSION_SPECS+=("$value") ;;
+            NPM) validate_npm_spec "$value" || exit 2; NPM_SPECS+=("$value") ;;
+            ENV) MANIFEST_ENVS+=("$value") ;;
+            PATH) MANIFEST_PATHS+=("$value") ;;
+            APT) MANIFEST_APT+=("$value") ;;
+            *) err "$PROFILE_FILE: Unsupported key '$key'"; exit 2 ;;
+        esac
+    done < "$PROFILE_FILE"
+    IMAGE="pi-sandbox-${PROFILE}:latest"
+    CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox.${PROFILE}"
+}
+
+write_containerfile() {
+    log "Generating $CONTAINERFILE"
+    (( DRY_RUN )) && return 0
+    [[ -r "$CONTAINERFILE_TEMPLATE" ]] || { err "Containerfile template not found: $CONTAINERFILE_TEMPLATE"; exit 1; }
+    mkdir -p "$(dirname "$CONTAINERFILE")"
+
+    local uv_version="" fnm_version="" spec tool version
+    for spec in "${TOOL_SPECS[@]}"; do
+        [[ "$spec" == *@* ]] || { err "Tool '$spec' must include a version"; exit 2; }
+        tool="${spec%%@*}"; version="${spec#*@}"
+        tool_known "$tool" || { err "Unsupported tool '$tool'"; exit 2; }
+        [[ "$tool" == "uv" ]] && uv_version="$version"
+        [[ "$tool" == "fnm" ]] && fnm_version="$version"
+    done
+    for spec in "${EXTENSION_SPECS[@]}"; do
+        case "$spec" in
+            uv:*) [[ -n "$uv_version" ]] || { err "Extension '$spec' requires --tool uv@VERSION"; exit 2; } ;;
+            fnm:node@*) [[ -n "$fnm_version" ]] || { err "Extension '$spec' requires --tool fnm@VERSION"; exit 2; }; [[ -n "${spec#fnm:node@}" ]] || { err "Extension '$spec' requires a Node version"; exit 2; } ;;
+            cargo:*|rustup:*) : ;;
+            *) err "Unsupported extension '$spec'"; exit 2 ;;
+        esac
+    done
+    for spec in "${NPM_SPECS[@]}"; do validate_npm_spec "$spec" || exit 2; done
+
+    local snippets; snippets="$(mktemp)" || { err "Cannot create temporary snippet file"; exit 1; }
+    trap 'rm -f "${snippets:-}"' RETURN
+
+    for spec in "${TOOL_SPECS[@]}"; do
+        tool="${spec%%@*}"; version="${spec#*@}"
+        case "$tool" in
+          go|rust|jvm|uv) append_snippet "$snippets" "$tool" "VERSION=$version" ;;
+          python) [[ -n "$uv_version" ]] || { err "Python@${version} requires uv; add --tool uv@VERSION"; exit 2; }; append_snippet "$snippets" python "VERSION=$version" ;;
+          fnm) append_snippet "$snippets" fnm "VERSION=${version#v}" ;;
+        esac
+    done
+
+    if ((${#NPM_SPECS[@]})); then
+        append_snippet "$snippets" npm-prefix
+        for spec in "${NPM_SPECS[@]}"; do append_snippet "$snippets" npm-package "PACKAGE=$spec"; done
+    fi
+
+    for spec in "${EXTENSION_SPECS[@]}"; do
+        case "$spec" in
+          uv:*) append_snippet "$snippets" extension-uv "PACKAGE=${spec#uv:}" ;;
+          cargo:*)
+              local ext crate version_arg
+              ext="${spec#cargo:}"
+              crate="${ext%%@*}"
+              version_arg=""
+              [[ "$ext" == *@* ]] && version_arg="--version ${ext#*@}"
+              append_snippet "$snippets" extension-cargo "CRATE=$crate" "VERSION_ARG=$version_arg"
+              ;;
+          rustup:*) append_snippet "$snippets" extension-rustup "COMPONENT=${spec#rustup:}" ;;
+          fnm:node@*) append_snippet "$snippets" extension-fnm-node "VERSION=${spec#fnm:node@}" ;;
+        esac
+    done
+    for spec in "${MANIFEST_ENVS[@]}"; do
+        [[ "$spec" == *=* ]] || { err "Invalid ENV entry '$spec'"; exit 2; }
+        local name="${spec%%=*}" value="${spec#*=}"
+        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { err "Invalid environment variable '$name'"; exit 2; }
+        printf 'ENV %s="%s"\n' "$name" "$value" >> "$snippets"
+    done
+    for spec in "${MANIFEST_PATHS[@]}"; do printf 'ENV PATH="%s:${PATH}"\n' "$spec" >> "$snippets"; done
+
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        case "$line" in
+          '{{APT_PACKAGES}}') if ((${#MANIFEST_APT[@]})); then printf '      %s \\\n' "${MANIFEST_APT[@]}"; fi ;;
+          '{{DYNAMIC_SNIPPETS}}') cat "$snippets" ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+    done < "$CONTAINERFILE_TEMPLATE" > "$CONTAINERFILE"
+    rm -f "$snippets"; trap - RETURN
+}
+
+require_podman() {
+    command -v podman >/dev/null 2>&1 || { err "Podman is not installed or not in PATH"; exit 1; }
+    (( DRY_RUN )) && return 0
+    podman info >/dev/null 2>&1 || { err "Podman is installed but 'podman info' failed"; exit 1; }
+}
+
+image_exists() { podman image exists "$IMAGE"; }
+
+build_image() {
+    local context; context="$(mktemp -d)" || { err "Cannot create temporary build context"; exit 1; }
+    trap 'rm -rf "${context:-}"' RETURN
+    log "Building $IMAGE"
+    echo "    Pi:            $PI_VERSION"
+    echo "    base image:    $BASE_IMAGE"
+    echo "    container ID:  ${CONTAINER_UID}:${CONTAINER_GID}"
+    local build_args=(--tag "$IMAGE" --build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "PI_VERSION=${PI_VERSION}" --build-arg "USER_NAME=${CONTAINER_USER}" --build-arg "USER_UID=${CONTAINER_UID}" --build-arg "USER_GID=${CONTAINER_GID}" --file "$CONTAINERFILE")
+    (( NO_CACHE )) && build_args+=(--no-cache)
+    (( PULL )) && build_args+=(--pull=always)
+    run_cmd podman build "${build_args[@]}" "$context"
+    rm -rf "$context"; trap - RETURN
+}
+
+confirm() { (( YES )) && return 0; [[ -t 0 ]] || { err "$1 requires confirmation; rerun with --yes"; return 1; }; local answer; read -r -p "$1 [y/N] " answer; [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]; }
+
+if [[ $# -eq 1 && ( ${1:-} == "--help" || ${1:-} == "-h" ) ]]; then
+    usage
+    exit 0
+fi
+
+# Find --config before loading configuration so CLI can select another file.
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+    if [[ "${args[i]}" == "--config" ]]; then
+        (( i + 1 < ${#args[@]} )) || { err "--config requires FILE"; exit 2; }
+        CONFIG_FILE="${args[i+1]}"
+    fi
+done
+
+load_config
+
+if [[ $# -gt 0 && "$1" != -* ]]; then PROFILE="$1"; shift; fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --create) [[ $# -ge 2 ]] || { err "$1 requires PROFILE"; exit 2; }; PROFILE="$2"; CREATE_PROFILE=1; shift ;;
+        --tool) [[ $# -ge 2 ]] || { err "$1 requires TOOL@VERSION"; exit 2; }; TOOL_SPECS+=("$2"); shift ;;
+        --extension) [[ $# -ge 2 ]] || { err "$1 requires TYPE:SPEC"; exit 2; }; EXTENSION_SPECS+=("$2"); shift ;;
+        --npm) [[ $# -ge 2 ]] || { err "$1 requires PACKAGE[@VERSION]"; exit 2; }; validate_npm_spec "$2" || exit 2; NPM_SPECS+=("$2"); shift ;;
+        --project-node) [[ $# -ge 2 ]] || { err "$1 requires VERSION"; exit 2; }; EXTENSION_SPECS+=("fnm:node@$2"); shift ;;
+        --env) [[ $# -ge 2 ]] || { err "$1 requires NAME=VALUE"; exit 2; }; MANIFEST_ENVS+=("$2"); shift ;;
+        --path) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; MANIFEST_PATHS+=("$2"); shift ;;
+        --apt) [[ $# -ge 2 ]] || { err "$1 requires PACKAGE"; exit 2; }; MANIFEST_APT+=("$2"); shift ;;
+        --build) BUILD=1 ;;
+        --update) UPDATE=1 ;;
+        --regenerate-containerfile) REGENERATE_CONTAINERFILE=1 ;;
+        --no-cache) NO_CACHE=1; UPDATE=1 ;;
+        --pull) PULL=1; UPDATE=1 ;;
+        --clean-image) CLEAN_IMAGE=1 ;;
+        --pi-version) [[ $# -ge 2 ]] || { err "$1 requires VERSION"; exit 2; }; PI_VERSION="$2"; shift ;;
+        --base-image) [[ $# -ge 2 ]] || { err "$1 requires IMAGE"; exit 2; }; BASE_IMAGE="$2"; shift ;;
+        --image) [[ $# -ge 2 ]] || { err "$1 requires IMAGE"; exit 2; }; IMAGE="$2"; shift ;;
+        --container-user) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; CONTAINER_USER="$2"; shift ;;
+        --container-uid) [[ $# -ge 2 ]] || { err "$1 requires UID"; exit 2; }; CONTAINER_UID="$2"; shift ;;
+        --container-gid) [[ $# -ge 2 ]] || { err "$1 requires GID"; exit 2; }; CONTAINER_GID="$2"; shift ;;
+        --config) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; CONFIG_FILE="$2"; shift ;;
+        --info) SHOW_INFO=1 ;;
+        --dry-run) DRY_RUN=1 ;;
+        --verbose|--debug) VERBOSE=1 ;;
+        --yes|-y) YES=1 ;;
+        --help|-h) usage; exit 0 ;;
+        *) err "Unknown option: $1"; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+validate_profile_name
+[[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "Container UID must be numeric"; exit 2; }
+[[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "Container GID must be numeric"; exit 2; }
+
+if (( CREATE_PROFILE )); then
+    [[ -n "$PROFILE" ]] || { err "--create requires a profile"; exit 2; }
+    ((${#TOOL_SPECS[@]})) || { err "Profile creation requires at least one --tool TOOL@VERSION"; exit 2; }
+    for spec in "${TOOL_SPECS[@]}"; do [[ "$spec" == *@* ]] || { err "'$spec': Version is required"; exit 2; }; tool_known "${spec%%@*}" || { err "Unsupported tool '${spec%%@*}'"; exit 2; }; done
+    for spec in "${EXTENSION_SPECS[@]}"; do case "$spec" in uv:*|cargo:*|rustup:*|fnm:node@?*) ;; *) err "Unsupported extension '$spec'"; exit 2;; esac; done
+    for spec in "${NPM_SPECS[@]}"; do validate_npm_spec "$spec" || exit 2; done
+    IMAGE="pi-sandbox-${PROFILE}:latest"
+    CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox.${PROFILE}"
+    write_manifest
+    REGENERATE_CONTAINERFILE=1; UPDATE=1
+elif [[ -n "$PROFILE" ]]; then
+    load_manifest
+fi
+
+if (( SHOW_INFO )); then
+    echo "Pi-sandbox build configuration"
+    printf '  profile:       %s\n' "${PROFILE:-default}"
+    printf '  manifest:      %s\n' "${PROFILE_FILE:-none}"
+    printf '  image:         %s\n' "$IMAGE"
+    printf '  containerfile: %s\n' "$CONTAINERFILE"
+    printf '  template:      %s\n' "$CONTAINERFILE_TEMPLATE"
+    printf '  manifest tpl:  %s\n' "$PROFILE_MANIFEST_TEMPLATE"
+    printf '  base image:    %s\n' "$BASE_IMAGE"
+    printf '  Pi version:    %s\n' "$PI_VERSION"
+    printf '  tools:         %s\n' "${TOOL_SPECS[*]:-base only}"
+    printf '  extensions:    %s\n' "${EXTENSION_SPECS[*]:-none}"
+    printf '  npm packages:  %s\n' "${NPM_SPECS[*]:-none}"
+    exit 0
+fi
+
+require_podman
+
+if (( CLEAN_IMAGE )); then
+    if (( DRY_RUN )); then
+        echo "+ podman image rm $(printf '%q' "$IMAGE")"
+        exit 0
+    fi
+    if podman image exists "$IMAGE"; then
+        confirm "Remove image '$IMAGE'?" || exit 1
+        run_cmd podman image rm "$IMAGE"
+    else
+        echo "Image '$IMAGE' does not exist."
+    fi
+    exit 0
+fi
+
+if (( REGENERATE_CONTAINERFILE )) || [[ ! -f "$CONTAINERFILE" ]]; then
+    write_containerfile
+fi
+
+if (( UPDATE )); then
+    build_image
+elif (( BUILD )); then
+    if (( DRY_RUN )); then
+        echo "# Build image only if missing: $IMAGE"
+    elif ! image_exists; then
+        build_image
+    else
+        log "Image already exists: $IMAGE"
+    fi
+else
+    log "No build requested. Use --build or --update."
+fi

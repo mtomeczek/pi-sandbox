@@ -1,0 +1,2 @@
+# Keep executable scripts, documentation, and templates stable across Unix and Windows checkouts.
+* text=auto eol=lf

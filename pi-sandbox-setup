@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+canonical_existing_path() {
+    local path="$1" directory name link
+
+    case "$path" in
+        /*) ;;
+        *) path="$PWD/$path" ;;
+    esac
+    while [[ -L "$path" ]]; do
+        directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+        link="$(readlink "$path")" || return 1
+        case "$link" in
+            /*) path="$link" ;;
+            *) path="$directory/$link" ;;
+        esac
+    done
+    [[ -e "$path" ]] || return 1
+    directory="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+    name="$(basename "$path")"
+    printf '%s/%s\n' "$directory" "$name"
+}
+
+SCRIPT_PATH="$(canonical_existing_path "${BASH_SOURCE[0]}")" || { printf 'Error: cannot resolve script path\n' >&2; exit 1; }
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+HELP_FILE="${SCRIPT_DIR}/docs/pi-sandbox-setup.md"
+XDG_BIN_HOME="${XDG_BIN_HOME:-${HOME}/.local/bin}"
+COMMANDS=(pi-sandbox-create pi-sandbox-run pi-sandbox-setup)
+
+err() {
+    printf 'Error: %s\n' "$*" >&2
+}
+
+warn() {
+    printf 'Warning: %s\n' "$*" >&2
+}
+
+usage() {
+    if [[ -r "$HELP_FILE" ]]; then
+        cat "$HELP_FILE"
+    else
+        printf 'Error: help file not found: %s\n' "$HELP_FILE" >&2
+        return 1
+    fi
+}
+
+resolve_link_target() {
+    local link="$1" target
+
+    target="$(readlink "$link")" || return 1
+    if [[ "$target" != /* ]]; then
+        target="$(dirname "$link")/$target"
+    fi
+    canonical_existing_path "$target"
+}
+
+validate_bin_directory() {
+    [[ "$XDG_BIN_HOME" == /* ]] || {
+        err "XDG_BIN_HOME must be an absolute path: $XDG_BIN_HOME"
+        return 1
+    }
+}
+
+install_links() {
+    local command target destination existing
+
+    validate_bin_directory || return 1
+
+    for command in "${COMMANDS[@]}"; do
+        target="${SCRIPT_DIR}/${command}"
+        destination="${XDG_BIN_HOME}/${command}"
+        [[ -x "$target" ]] || {
+            err "Installation target is missing or not executable: $target"
+            return 1
+        }
+        if [[ -e "$destination" || -L "$destination" ]]; then
+            [[ -L "$destination" ]] || {
+                err "Refusing to replace non-symlink: $destination"
+                return 1
+            }
+            existing="$(resolve_link_target "$destination")" || {
+                err "Cannot inspect symlink: $destination"
+                return 1
+            }
+            [[ "$existing" == "$target" ]] || {
+                err "Refusing to replace unrelated symlink: $destination -> $(readlink "$destination")"
+                return 1
+            }
+        fi
+    done
+
+    mkdir -p "$XDG_BIN_HOME"
+    for command in "${COMMANDS[@]}"; do
+        target="${SCRIPT_DIR}/${command}"
+        destination="${XDG_BIN_HOME}/${command}"
+        ln -sfn "$target" "$destination"
+        printf 'Installed: %s -> %s\n' "$destination" "$target"
+    done
+
+    case ":${PATH}:" in
+        *":${XDG_BIN_HOME}:"*) ;;
+        *) warn "${XDG_BIN_HOME} is not in PATH" ;;
+    esac
+}
+
+remove_links() {
+    local command target destination existing
+
+    validate_bin_directory || return 1
+
+    for command in "${COMMANDS[@]}"; do
+        target="${SCRIPT_DIR}/${command}"
+        destination="${XDG_BIN_HOME}/${command}"
+        if [[ ! -e "$destination" && ! -L "$destination" ]]; then
+            printf 'Not installed: %s\n' "$destination"
+            continue
+        fi
+        [[ -L "$destination" ]] || {
+            warn "Not removing non-symlink: $destination"
+            continue
+        }
+        existing="$(resolve_link_target "$destination")" || {
+            warn "Cannot inspect symlink: $destination"
+            continue
+        }
+        [[ "$existing" == "$target" ]] || {
+            warn "Not removing unrelated symlink: $destination -> $(readlink "$destination")"
+            continue
+        }
+        rm "$destination"
+        printf 'Removed: %s\n' "$destination"
+    done
+}
+
+case "${1:-}" in
+    --install)
+        [[ $# -eq 1 ]] || { err "--install cannot be combined with other arguments"; exit 2; }
+        install_links
+        ;;
+    --remove)
+        [[ $# -eq 1 ]] || { err "--remove cannot be combined with other arguments"; exit 2; }
+        remove_links
+        ;;
+    --help|-h)
+        [[ $# -eq 1 ]] || { err "$1 cannot be combined with other arguments"; exit 2; }
+        usage
+        ;;
+    *)
+        err "Expected --install, --remove, or --help"
+        usage >&2
+        exit 2
+        ;;
+esac
