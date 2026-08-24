@@ -353,10 +353,18 @@ bash tests/macos-compat.sh
 bash tests/release-policy.sh
 ```
 
-Run ShellCheck locally when available (the GitHub Actions workflow installs it automatically):
+Run ShellCheck locally when available (the GitHub Actions static-analysis workflow installs it on Linux and macOS):
 
 ```bash
 shellcheck --shell=bash --severity=warning pi-sandbox-create pi-sandbox-run pi-sandbox-setup tests/*.sh
+```
+
+Run the matching Windows static analysis with the checked-in settings:
+
+```powershell
+Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+Invoke-ScriptAnalyzer -Path .\pi-sandbox-create.ps1 -Settings .\PSScriptAnalyzerSettings.psd1
+Invoke-ScriptAnalyzer -Path .\pi-sandbox-run.ps1 -Settings .\PSScriptAnalyzerSettings.psd1
 ```
 
 Validate the Windows PowerShell launchers and their help contracts:

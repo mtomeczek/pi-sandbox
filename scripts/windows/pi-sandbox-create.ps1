@@ -28,7 +28,7 @@ function Fail([string]$Message)
 { throw "error: $Message"
 }
 function Log([string]$Message)
-{ Write-Host "==> $Message"
+{ Write-Output "==> $Message"
 }
 function Test-Tool([string]$Name)
 { return $Name -in @('go','rust','jvm','uv','fnm','python')
@@ -39,7 +39,7 @@ function Test-NpmSpec([string]$Spec)
     }
 }
 function Show-Command([string[]]$Command)
-{ Write-Host ('+ ' + (($Command | ForEach-Object { if ($_ -match '\s')
+{ Write-Output ('+ ' + (($Command | ForEach-Object { if ($_ -match '\s')
                     { '"' + $_.Replace('"','\"') + '"'
                     } else
                     { $_

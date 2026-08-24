@@ -50,7 +50,7 @@ function Fail([string]$Message)
 { throw "error: $Message"
 }
 function Log([string]$Message)
-{ Write-Host "==> $Message"
+{ Write-Output "==> $Message"
 }
 function Quote-Arg([string]$Value)
 { if ($Value -match '[\s"'']')
@@ -58,7 +58,7 @@ function Quote-Arg([string]$Value)
     }; return $Value
 }
 function Show-Command([string[]]$Command)
-{ Write-Host ('+ ' + (($Command | ForEach-Object { Quote-Arg $_ }) -join ' '))
+{ Write-Output ('+ ' + (($Command | ForEach-Object { Quote-Arg $_ }) -join ' '))
 }
 
 function Render-Template([string]$Template, [string]$Output, [hashtable]$Values)
