@@ -1,0 +1,12 @@
+# Project-local Pi sandbox startup configuration.
+# This file is declarative data; it is never sourced as shell code.
+# CLI options override NAME and are appended after PORT and MOUNT entries.
+
+# NAME=backend
+# PORT=3000:3000
+# PORT=9229:9229/tcp
+# MOUNT=./shared-libs:/src/shared:ro
+# Install a Pi package into this project's .pi/settings.json at startup.
+# Supported sources: npm:, git:, http(s):, or an existing workspace-relative ./ path.
+# PI_EXTENSION=npm:@acme/pi-tools@1.2.3
+# PI_EXTENSION=./tools/local-pi-package

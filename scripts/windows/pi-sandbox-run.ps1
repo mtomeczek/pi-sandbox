@@ -9,15 +9,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
-$ConfigRoot = if ($env:APPDATA)
-{ Join-Path $env:APPDATA 'pi-sandbox'
-} else
-{ Join-Path $HOME 'AppData\Roaming\pi-sandbox'
+$ConfigRoot = if ($env:APPDATA) {
+    Join-Path $env:APPDATA 'pi-sandbox'
+}
+else {
+    Join-Path $HOME 'AppData\Roaming\pi-sandbox'
 }
 $ConfigFile = Join-Path $ConfigRoot 'config'
 $AllowedRootsFile = Join-Path $ConfigRoot 'allowed-roots'
 $ConfigTemplate = Join-Path $ScriptDir 'templates\run.config.template'
 $AllowedRootsTemplate = Join-Path $ScriptDir 'templates\allowed-roots.template'
+$ProjectRcTemplate = Join-Path $ScriptDir 'templates\pisandboxrc.template'
 
 $Image = 'pi-sandbox:latest'
 $ContainerUser = 'pi'
@@ -37,46 +39,49 @@ $HostWorkspace = ''
 $ShellMode = $false
 $DryRun = $false
 $ShowInfo = $false
+$ListImages = $false
+$InitProjectConfig = $false
 $ShowState = $false
 $ResetState = $false
 $Yes = $false
 $StateVolumeSet = $false
 $ExtraMounts = [System.Collections.Generic.List[string]]::new()
+$ForwardedPorts = [System.Collections.Generic.List[string]]::new()
+$PiExtensions = [System.Collections.Generic.List[string]]::new()
+$ProjectRcFile = ''
 $ProfileName = ''
 $PiArgs = [System.Collections.Generic.List[string]]::new()
 $AllowedRoots = [System.Collections.Generic.List[string]]::new()
 
-function Fail([string]$Message)
-{ throw "error: $Message"
+function Fail([string]$Message) {
+    throw "error: $Message"
 }
-function Log([string]$Message)
-{ Write-Output "==> $Message"
+function Log([string]$Message) {
+    Write-Output "==> $Message"
 }
-function Quote-Arg([string]$Value)
-{ if ($Value -match '[\s"'']')
-    { return '"' + $Value.Replace('"', '\"') + '"'
+function Quote-Arg([string]$Value) {
+    if ($Value -match '[\s"'']') {
+        return '"' + $Value.Replace('"', '\"') + '"'
     }; return $Value
 }
-function Show-Command([string[]]$Command)
-{ Write-Output ('+ ' + (($Command | ForEach-Object { Quote-Arg $_ }) -join ' '))
+function Show-Command([string[]]$Command) {
+    Write-Output ('+ ' + (($Command | ForEach-Object { Quote-Arg $_ }) -join ' '))
 }
 
-function Render-Template([string]$Template, [string]$Output, [hashtable]$Values)
-{
-    if (-not (Test-Path -LiteralPath $Template -PathType Leaf))
-    { Fail "template not found: $Template"
+function Render-Template([string]$Template, [string]$Output, [hashtable]$Values) {
+    if (-not (Test-Path -LiteralPath $Template -PathType Leaf)) {
+        Fail "template not found: $Template"
     }
     $content = [System.IO.File]::ReadAllText($Template)
-    foreach ($key in $Values.Keys)
-    { $content = $content.Replace("{{$key}}", [string]$Values[$key])
+    foreach ($key in $Values.Keys) {
+        $content = $content.Replace("{{$key}}", [string]$Values[$key])
     }
     $directory = Split-Path -Parent $Output
     [System.IO.Directory]::CreateDirectory($directory) | Out-Null
     [System.IO.File]::WriteAllText($Output, $content)
 }
 
-function Write-DefaultConfig
-{
+function Write-DefaultConfig {
     Render-Template $ConfigTemplate $ConfigFile @{
         CONTAINER_USER = $ContainerUser; CONTAINER_UID = $ContainerUid; CONTAINER_GID = $ContainerGid
         CONTAINER_HOME = $ContainerHome; STATE_VOLUME = $AgentVolume; MEMORY = $Memory; CPUS = $Cpus
@@ -84,198 +89,219 @@ function Write-DefaultConfig
     }
 }
 
-function Write-DefaultAllowedRoots
-{
+function Write-DefaultAllowedRoots {
     $defaultRoot = Join-Path $HOME 'src'
-    if (-not (Test-Path -LiteralPath $defaultRoot))
-    { [System.IO.Directory]::CreateDirectory($defaultRoot) | Out-Null
+    if (-not (Test-Path -LiteralPath $defaultRoot)) {
+        [System.IO.Directory]::CreateDirectory($defaultRoot) | Out-Null
     }
-    if (-not (Test-Path -LiteralPath $defaultRoot -PathType Container))
-    { Fail "default allowed root is not a directory: $defaultRoot"
+    if (-not (Test-Path -LiteralPath $defaultRoot -PathType Container)) {
+        Fail "default allowed root is not a directory: $defaultRoot"
     }
-    if (-not (Test-Path -LiteralPath $AllowedRootsTemplate -PathType Leaf))
-    { Fail "template not found: $AllowedRootsTemplate"
+    if (-not (Test-Path -LiteralPath $AllowedRootsTemplate -PathType Leaf)) {
+        Fail "template not found: $AllowedRootsTemplate"
     }
     Render-Template $AllowedRootsTemplate $AllowedRootsFile @{ DEFAULT_ROOT = $defaultRoot }
 }
 
-function Get-ConfigValue([string]$Line)
-{
+function Get-ConfigValue([string]$Line) {
     $value = $Line.Substring($Line.IndexOf('=') + 1).Trim()
-    if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))
-    { return $value.Substring(1, $value.Length - 2)
+    if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+        return $value.Substring(1, $value.Length - 2)
     }
     return $value
 }
 
-function Load-Config
-{
-    if (-not (Test-Path -LiteralPath $ConfigFile))
-    { Write-DefaultConfig; return
+function Load-Config {
+    if (-not (Test-Path -LiteralPath $ConfigFile)) {
+        Write-DefaultConfig; return
     }
     $lineNumber = 0
-    foreach ($rawLine in Get-Content -LiteralPath $ConfigFile)
-    {
+    foreach ($rawLine in Get-Content -LiteralPath $ConfigFile) {
         $lineNumber++; $line = $rawLine.Trim()
-        if (-not $line -or $line.StartsWith('#'))
-        { continue
+        if (-not $line -or $line.StartsWith('#')) {
+            continue
         }
-        if (-not $line.Contains('='))
-        { Fail "${ConfigFile}:${lineNumber}: expected KEY=VALUE"
+        if (-not $line.Contains('=')) {
+            Fail "${ConfigFile}:${lineNumber}: expected KEY=VALUE"
         }
         $key = $line.Substring(0, $line.IndexOf('=')).Trim(); $value = Get-ConfigValue $line
-        switch ($key)
-        {
-            'IMAGE'
-            { $script:Image = $value
+        switch ($key) {
+            'IMAGE' {
+                $script:Image = $value
             }
-            'CONTAINER_USER'
-            { $script:ContainerUser = $value
+            'CONTAINER_USER' {
+                $script:ContainerUser = $value
             }
-            'CONTAINER_UID'
-            { $script:ContainerUid = $value
+            'CONTAINER_UID' {
+                $script:ContainerUid = $value
             }
-            'CONTAINER_GID'
-            { $script:ContainerGid = $value
+            'CONTAINER_GID' {
+                $script:ContainerGid = $value
             }
-            'CONTAINER_HOME'
-            { $script:ContainerHome = $value
+            'CONTAINER_HOME' {
+                $script:ContainerHome = $value
             }
-            'STATE_VOLUME'
-            { $script:AgentVolume = $value
+            'STATE_VOLUME' {
+                $script:AgentVolume = $value
             }
-            'AGENT_VOLUME'
-            { $script:AgentVolume = $value
+            'AGENT_VOLUME' {
+                $script:AgentVolume = $value
             }
-            'MEMORY'
-            { $script:Memory = $value
+            'MEMORY' {
+                $script:Memory = $value
             }
-            'CPUS'
-            { $script:Cpus = $value
+            'CPUS' {
+                $script:Cpus = $value
             }
-            'PIDS_LIMIT'
-            { $script:PidsLimit = $value
+            'PIDS_LIMIT' {
+                $script:PidsLimit = $value
             }
-            'ENV_FILE'
-            { $script:EnvFile = $value
+            'ENV_FILE' {
+                $script:EnvFile = $value
             }
-            'NETWORK_MODE'
-            { $script:NetworkMode = $value
+            'NETWORK_MODE' {
+                $script:NetworkMode = $value
             }
-            'MOUNT'
-            { $script:ExtraMounts.Add($value)
+            'MOUNT' {
+                $script:ExtraMounts.Add($value)
             }
-            'VERBOSE'
-            { if ($value -match '^(1|true|yes)$')
-                { $script:VerboseMode = $true
+            'VERBOSE' {
+                if ($value -match '^(1|true|yes)$') {
+                    $script:VerboseMode = $true
                 }
             }
-            'BASE_IMAGE'
-            {
+            'BASE_IMAGE' {
             }
-            'PI_VERSION'
-            {
+            'PI_VERSION' {
             }
-            'PROFILE_DIR'
-            {
+            'PROFILE_DIR' {
             }
-            default
-            { Fail "${ConfigFile}:${lineNumber}: unsupported config key '$key'"
+            default {
+                Fail "${ConfigFile}:${lineNumber}: unsupported config key '$key'"
             }
         }
     }
 }
 
-function Get-CanonicalDirectory([string]$Path, [string]$Description)
-{
-    if (-not (Test-Path -LiteralPath $Path -PathType Container))
-    { Fail "$Description must be an existing directory: $Path"
+function Load-ProjectConfig {
+    $script:ProjectRcFile = Join-Path $HostWorkspace '.pisandboxrc'
+    if (-not (Test-Path -LiteralPath $ProjectRcFile)) { return }
+    $item = Get-Item -LiteralPath $ProjectRcFile -Force
+    if (-not $item.PSIsContainer -and -not (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { } else { Fail "project configuration must be a non-symlinked file: $ProjectRcFile" }
+    $nameSet = $false; $lineNumber = 0
+    foreach ($rawLine in Get-Content -LiteralPath $ProjectRcFile) {
+        $lineNumber++; $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        if (-not $line.Contains('=')) { Fail "${ProjectRcFile}:${lineNumber}: expected KEY=VALUE" }
+        $key = $line.Substring(0, $line.IndexOf('=')).Trim(); $value = Get-ConfigValue $line
+        switch ($key) {
+            'NAME' { if ($nameSet) { Fail "${ProjectRcFile}:${lineNumber}: NAME may only be specified once" }; if (-not $InstanceName) { $script:InstanceName = $value }; $nameSet = $true }
+            'PORT' { $script:ForwardedPorts.Add($value) }
+            'MOUNT' { if ($value -like './*:*') { $value = (Join-Path $HostWorkspace $value.Substring(2)) }; $script:ExtraMounts.Add($value) }
+            'PI_EXTENSION' { $script:PiExtensions.Add($value) }
+            default { Fail "${ProjectRcFile}:${lineNumber}: unsupported project config key '$key'" }
+        }
+    }
+}
+
+function Parse-Port([string]$Spec) {
+    if ($Spec -notmatch '^(?<host>\d{1,5}):(?<container>\d{1,5})(/(?<protocol>tcp|udp))?$') { Fail "invalid port '$Spec'; expected HOST_PORT:CONTAINER_PORT[/tcp|udp]" }
+    if ([int]$Matches.host -lt 1 -or [int]$Matches.host -gt 65535 -or [int]$Matches.container -lt 1 -or [int]$Matches.container -gt 65535) { Fail "port numbers must be between 1 and 65535: $Spec" }
+    return "$($Matches.host):$($Matches.container)/$(if ($Matches.protocol) { $Matches.protocol } else { 'tcp' })"
+}
+
+function Test-PiExtension([string]$Spec) {
+    if (-not $Spec -or $Spec.StartsWith('-')) { Fail "invalid PI_EXTENSION '$Spec'" }
+    if ($Spec -match '^(npm:|git:|https?://)') { return }
+    if (-not $Spec.StartsWith('./')) { Fail "PI_EXTENSION must be npm:, git:, http(s):, or a workspace-relative ./ path: $Spec" }
+    $path = [IO.Path]::GetFullPath((Join-Path $HostWorkspace $Spec.Substring(2)))
+    if (-not (Test-Path -LiteralPath $path) -or -not (Test-PathBelow $path $HostWorkspace)) { Fail "local PI_EXTENSION must exist within workspace: $Spec" }
+}
+
+function Get-CanonicalDirectory([string]$Path, [string]$Description) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        Fail "$Description must be an existing directory: $Path"
     }
     $item = Get-Item -LiteralPath $Path -Force
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
-    { Fail "$Description cannot be a symbolic link or junction: $Path"
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Fail "$Description cannot be a symbolic link or junction: $Path"
     }
     return [IO.Path]::GetFullPath($item.FullName).TrimEnd('\', '/')
 }
 
-function Test-PathBelow([string]$Child, [string]$Parent)
-{
+function Test-PathBelow([string]$Child, [string]$Parent) {
     $prefix = $Parent.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     return $Child.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
 }
 
-function Load-AllowedRoots
-{
-    if (-not (Test-Path -LiteralPath $AllowedRootsFile))
-    { Write-DefaultAllowedRoots
+function Load-AllowedRoots {
+    if (-not (Test-Path -LiteralPath $AllowedRootsFile)) {
+        Write-DefaultAllowedRoots
     }
     $script:AllowedRoots.Clear()
     $lineNumber = 0
-    foreach ($rawLine in Get-Content -LiteralPath $AllowedRootsFile)
-    {
+    foreach ($rawLine in Get-Content -LiteralPath $AllowedRootsFile) {
         $lineNumber++; $entry = $rawLine.Trim()
-        if (-not $entry -or $entry.StartsWith('#'))
-        { continue
+        if (-not $entry -or $entry.StartsWith('#')) {
+            continue
         }
-        if (-not [IO.Path]::IsPathRooted($entry) -or $entry -match '(^|[\\/])\.{1,2}([\\/]|$)' -or $entry -match '(^|[\\/])\.')
-        { Fail "${AllowedRootsFile}:${lineNumber}: allowed root must be a visible absolute path: $entry"
+        if (-not [IO.Path]::IsPathRooted($entry) -or $entry -match '(^|[\\/])\.{1,2}([\\/]|$)' -or $entry -match '(^|[\\/])\.') {
+            Fail "${AllowedRootsFile}:${lineNumber}: allowed root must be a visible absolute path: $entry"
         }
         $candidate = Get-CanonicalDirectory $entry 'allowed root'
         $rootPath = [IO.Path]::GetPathRoot($candidate).TrimEnd('\', '/')
-        if ($candidate.TrimEnd('\', '/') -eq $rootPath)
-        { Fail "${AllowedRootsFile}:${lineNumber}: filesystem root is not an allowed root: $entry"
+        if ($candidate.TrimEnd('\', '/') -eq $rootPath) {
+            Fail "${AllowedRootsFile}:${lineNumber}: filesystem root is not an allowed root: $entry"
         }
-        if (-not ($script:AllowedRoots | Where-Object { $_.Equals($candidate, [StringComparison]::OrdinalIgnoreCase) }))
-        { $script:AllowedRoots.Add($candidate)
-        }
-    }
-}
-
-function Assert-VisiblePath([string]$Path, [string]$Description)
-{
-    foreach ($part in ($Path -split '[\\/]'))
-    { if ($part.StartsWith('.'))
-        { Fail "$Description contains a hidden path component: $Path"
+        if (-not ($script:AllowedRoots | Where-Object { $_.Equals($candidate, [StringComparison]::OrdinalIgnoreCase) })) {
+            $script:AllowedRoots.Add($candidate)
         }
     }
 }
 
-function Validate-HostDirectory([string]$Source, [string]$Description)
-{
-    if ($Source.StartsWith('.\') -or $Source.StartsWith('./'))
-    { $Source = Join-Path (Get-Location) $Source.Substring(2)
-    } elseif (-not [IO.Path]::IsPathRooted($Source))
-    { Fail "$Description must be an absolute path or start with '.\': $Source"
+function Assert-VisiblePath([string]$Path, [string]$Description) {
+    foreach ($part in ($Path -split '[\\/]')) {
+        if ($part.StartsWith('.')) {
+            Fail "$Description contains a hidden path component: $Path"
+        }
     }
-    if ($Source -match '(^|[\\/])\.{1,2}([\\/]|$)')
-    { Fail "$Description cannot contain '.' or '..': $Source"
+}
+
+function Validate-HostDirectory([string]$Source, [string]$Description) {
+    if ($Source.StartsWith('.\') -or $Source.StartsWith('./')) {
+        $Source = Join-Path (Get-Location) $Source.Substring(2)
+    }
+    elseif (-not [IO.Path]::IsPathRooted($Source)) {
+        Fail "$Description must be an absolute path or start with '.\': $Source"
+    }
+    if ($Source -match '(^|[\\/])\.{1,2}([\\/]|$)') {
+        Fail "$Description cannot contain '.' or '..': $Source"
     }
     Assert-VisiblePath $Source $Description
     $canonical = Get-CanonicalDirectory $Source $Description
-    foreach ($root in $AllowedRoots)
-    { if (Test-PathBelow $canonical $root)
-        { return $canonical
+    foreach ($root in $AllowedRoots) {
+        if (Test-PathBelow $canonical $root) {
+            return $canonical
         }
     }
-    $roots = if ($AllowedRoots.Count)
-    { $AllowedRoots -join ', '
-    } else
-    { 'none configured'
+    $roots = if ($AllowedRoots.Count) {
+        $AllowedRoots -join ', '
+    }
+    else {
+        'none configured'
     }
     Fail "$Description must be below an allowed root ($roots): $canonical"
 }
 
-function Validate-ContainerMountpoint([string]$Target)
-{
-    if (-not $Target.StartsWith('/') -or $Target -eq '/' -or $Target -match '//' -or $Target -match '(^|/)\.{1,2}(/|$)' -or $Target -match '(^|)/\.')
-    { Fail "invalid container mount destination: $Target"
+function Validate-ContainerMountpoint([string]$Target) {
+    if (-not $Target.StartsWith('/') -or $Target -eq '/' -or $Target -match '//' -or $Target -match '(^|/)\.{1,2}(/|$)' -or $Target -match '(^|)/\.') {
+        Fail "invalid container mount destination: $Target"
     }
 }
 
-function Resolve-Workspace
-{
-    if (-not $HostWorkspace)
-    { $script:HostWorkspace = (Get-Location).Path
+function Resolve-Workspace {
+    if (-not $HostWorkspace) {
+        $script:HostWorkspace = (Get-Location).Path
     }
     $script:HostWorkspace = Validate-HostDirectory $HostWorkspace 'workspace'
     $name = Split-Path -Leaf $HostWorkspace
@@ -283,191 +309,239 @@ function Resolve-Workspace
     Validate-ContainerMountpoint $ContainerStartDir
 }
 
-function Parse-Mount([string]$Spec)
-{
-    if ($Spec -notmatch '^(?<source>[A-Za-z]:[\\/].*):(?<target>/[^:]+)(:(?<mode>ro|rw))?$')
-    { Fail "invalid --mount '$Spec'; expected C:\host:/container[:ro|rw]"
+function Parse-Mount([string]$Spec) {
+    if ($Spec -notmatch '^(?<source>[A-Za-z]:[\\/].*):(?<target>/[^:]+)(:(?<mode>ro|rw))?$') {
+        Fail "invalid --mount '$Spec'; expected C:\host:/container[:ro|rw]"
     }
     $source = Validate-HostDirectory $Matches.source 'mount source'
     Validate-ContainerMountpoint $Matches.target
-    $mode = if ($Matches.mode)
-    { $Matches.mode
-    } else
-    { 'rw'
+    $mode = if ($Matches.mode) {
+        $Matches.mode
+    }
+    else {
+        'rw'
     }
     return "$source`:$($Matches.target):$mode"
 }
 
-function Require-Podman
-{
-    if (-not (Get-Command podman -ErrorAction SilentlyContinue))
-    { Fail 'podman is not installed or not in PATH'
+function List-SandboxImages {
+    & podman image ls --format '{{.Repository}}`t{{.Tag}}`t{{.ID}}`t{{.CreatedSince}}`t{{.Size}}' |
+        ForEach-Object { $parts = $_ -split "`t"; if ($parts.Count -eq 5 -and $parts[1] -eq 'pi-sandbox') { '- {0,-35} {1,-17} {2,-13} {3,-12} {4}' -f $parts } }
+}
+function Initialize-ProjectConfig {
+    $target = Join-Path $HostWorkspace '.pisandboxrc'
+    if (Test-Path -LiteralPath $target) {
+        Fail "project config already exists: $target"
     }
-    if (-not $DryRun)
-    { & podman info *> $null; if ($LASTEXITCODE -ne 0)
-        { Fail 'podman info failed'
+    if (-not (Test-Path -LiteralPath $ProjectRcTemplate -PathType Leaf)) {
+        Fail "template not found: $ProjectRcTemplate"
+    }
+    if ($InstanceName -and $InstanceName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        Fail "invalid sandbox name '$InstanceName'"
+    }
+    if ($DryRun) {
+        if ($InstanceName) { Show-Command @('Create-ProjectConfig', $target, "NAME=$InstanceName") }
+        else { Show-Command @('Copy-Item', $ProjectRcTemplate, $target) }
+        return
+    }
+    if ($InstanceName) {
+        $content = [System.IO.File]::ReadAllText($ProjectRcTemplate)
+        [System.IO.File]::WriteAllText($target, ($content -replace '(?m)^# NAME=.*$', "NAME=$InstanceName"))
+    }
+    else {
+        Copy-Item -LiteralPath $ProjectRcTemplate -Destination $target -ErrorAction Stop
+    }
+    Log "Created project config: $target"
+}
+
+function Require-Podman {
+    if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
+        Fail 'podman is not installed or not in PATH'
+    }
+    if (-not $DryRun) {
+        & podman info *> $null; if ($LASTEXITCODE -ne 0) {
+            Fail 'podman info failed'
         }
     }
 }
 
-function Confirm([string]$Prompt)
-{ if ($Yes)
-    { return $true
+function Confirm([string]$Prompt) {
+    if ($Yes) {
+        return $true
     }; return (Read-Host "$Prompt [y/N]") -match '^[Yy]([Ee][Ss])?$'
 }
-function Podman-Exists([string[]]$Arguments)
-{ & podman @Arguments *> $null; return $LASTEXITCODE -eq 0
+function Podman-Exists([string[]]$Arguments) {
+    & podman @Arguments *> $null; return $LASTEXITCODE -eq 0
 }
 
-function Usage
-{ Get-Content -LiteralPath (Join-Path $ScriptDir 'docs\pi-sandbox-run.windows.md')
+function Usage {
+    Get-Content -LiteralPath (Join-Path $ScriptDir 'docs\pi-sandbox-run.windows.md')
 }
 
 # Select an alternate config before loading defaults.
-for ($i = 0; $i -lt $args.Count; $i++)
-{ if ($args[$i] -eq '--config')
-    { if ($i + 1 -ge $args.Count)
-        { Fail '--config requires FILE'
+for ($i = 0; $i -lt $args.Count; $i++) {
+    if ($args[$i] -eq '--config') {
+        if ($i + 1 -ge $args.Count) {
+            Fail '--config requires FILE'
         }; $ConfigFile = $args[$i + 1]; $ConfigRoot = Split-Path -Parent $ConfigFile; $AllowedRootsFile = Join-Path $ConfigRoot 'allowed-roots'
     }
 }
-if ($args.Count -eq 1 -and $args[0] -in @('--help', '-h'))
-{ Usage; exit 0
+if ($args.Count -eq 1 -and $args[0] -in @('--help', '-h')) {
+    Usage; exit 0
 }
 
 Load-Config
 Load-AllowedRoots
 
 $index = 0
-if ($index -lt $args.Count -and -not $args[$index].StartsWith('-'))
-{ $ProfileName = $args[$index]; $index++
+if ($index -lt $args.Count -and -not $args[$index].StartsWith('-')) {
+    $ProfileName = $args[$index]; $index++
 }
-while ($index -lt $args.Count)
-{
+while ($index -lt $args.Count) {
     $argument = $args[$index]
-    if ($argument -eq '--')
-    { $index++; while ($index -lt $args.Count)
-        { $PiArgs.Add($args[$index]); $index++
+    if ($argument -eq '--') {
+        $index++; while ($index -lt $args.Count) {
+            $PiArgs.Add($args[$index]); $index++
         }; break
     }
-    switch ($argument)
-    {
-        '--name'
-        { $index++; if ($index -ge $args.Count)
-            { Fail '--name requires NAME'
+    switch ($argument) {
+        '--name' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--name requires NAME'
             }; $InstanceName = $args[$index]
         }
-        '--workspace'
-        { $index++; if ($index -ge $args.Count)
-            { Fail '--workspace requires DIRECTORY'
+        '--workspace' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--workspace requires DIRECTORY'
             }; $HostWorkspace = $args[$index]
         }
-        '--mount'
-        { $index++; if ($index -ge $args.Count)
-            { Fail '--mount requires SPEC'
+        '--mount' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--mount requires SPEC'
             }; $ExtraMounts.Add($args[$index])
         }
-        '--env-file'
-        { $index++; if ($index -ge $args.Count)
-            { Fail '--env-file requires FILE'
+        '--port' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--port requires SPEC'
+            }; $ForwardedPorts.Add($args[$index])
+        }
+        '--env-file' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--env-file requires FILE'
             }; $EnvFile = $args[$index]
         }
-        '--state-volume'
-        { $index++; if ($index -ge $args.Count)
-            { Fail '--state-volume requires NAME'
+        '--state-volume' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--state-volume requires NAME'
             }; $AgentVolume = $args[$index]; $StateVolumeSet = $true
         }
-        '--memory'
-        { $index++; if ($index -ge $args.Count)
-            { Fail '--memory requires SIZE'
+        '--memory' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--memory requires SIZE'
             }; $Memory = $args[$index]
         }
-        '--cpus'
-        { $index++; if ($index -ge $args.Count)
-            { Fail '--cpus requires NUMBER'
+        '--cpus' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--cpus requires NUMBER'
             }; $Cpus = $args[$index]
         }
-        '--pids-limit'
-        { $index++; if ($index -ge $args.Count)
-            { Fail '--pids-limit requires NUMBER'
+        '--pids-limit' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--pids-limit requires NUMBER'
             }; $PidsLimit = $args[$index]
         }
-        '--no-network'
-        { $NetworkMode = 'none'
+        '--no-network' {
+            $NetworkMode = 'none'
         }
-        '--shell'
-        { $ShellMode = $true
+        '--shell' {
+            $ShellMode = $true
         }
-        '--image'
-        { $index++; if ($index -ge $args.Count)
-            { Fail '--image requires IMAGE'
+        '--image' {
+            $index++; if ($index -ge $args.Count) {
+                Fail '--image requires IMAGE'
             }; $Image = $args[$index]; $ProfileName = ''
         }
-        '--show-state'
-        { $ShowState = $true
+        '--show-state' {
+            $ShowState = $true
         }
-        '--reset-state'
-        { $ResetState = $true
+        '--reset-state' {
+            $ResetState = $true
         }
-        '--info'
-        { $ShowInfo = $true
+        '--info' {
+            $ShowInfo = $true
         }
-        '--dry-run'
-        { $DryRun = $true
+        '--list-images' {
+            $ListImages = $true
         }
-        '--verbose'
-        { $VerboseMode = $true
+        '--init' {
+            $InitProjectConfig = $true
         }
-        '--debug'
-        { $VerboseMode = $true
+        '--dry-run' {
+            $DryRun = $true
         }
-        '--yes'
-        { $Yes = $true
+        '--verbose' {
+            $VerboseMode = $true
         }
-        '-y'
-        { $Yes = $true
+        '--debug' {
+            $VerboseMode = $true
         }
-        '--config'
-        { $index++
+        '--yes' {
+            $Yes = $true
         }
-        '--help'
-        { Usage; exit 0
+        '-y' {
+            $Yes = $true
         }
-        '-h'
-        { Usage; exit 0
+        '--config' {
+            $index++
         }
-        default
-        { Fail "unknown option: $argument"
+        '--help' {
+            Usage; exit 0
+        }
+        '-h' {
+            Usage; exit 0
+        }
+        default {
+            Fail "unknown option: $argument"
         }
     }
     $index++
 }
 
-if ($ProfileName -and $ProfileName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$')
-{ Fail "invalid profile name '$ProfileName'"
-}
-if ($InstanceName -and $InstanceName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$')
-{ Fail "invalid sandbox name '$InstanceName'"
-}
-if ($PidsLimit -notmatch '^\d+$')
-{ Fail 'pids limit must be numeric'
-}
-if (-not $ContainerHome.StartsWith('/'))
-{ Fail 'container home must be an absolute path'
+if ($ListImages) {
+    Require-Podman
+    List-SandboxImages
+    exit 0
 }
 
-if ($ProfileName)
-{ $Image = "pi-sandbox-$ProfileName`:latest"; if (-not $StateVolumeSet)
-    { $AgentVolume = "pi-agent-$ProfileName$(if ($InstanceName) { "-$InstanceName" })"
+Resolve-Workspace
+if ($InitProjectConfig) {
+    Initialize-ProjectConfig; exit 0
+}
+Load-ProjectConfig
+if ($ProfileName -and $ProfileName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    Fail "invalid profile name '$ProfileName'"
+}
+if ($InstanceName -and $InstanceName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    Fail "invalid sandbox name '$InstanceName'"
+}
+if ($PidsLimit -notmatch '^\d+$') {
+    Fail 'pids limit must be numeric'
+}
+if (-not $ContainerHome.StartsWith('/')) {
+    Fail 'container home must be an absolute path'
+}
+
+if ($ProfileName) {
+    $Image = "pi-sandbox-$ProfileName`:latest"; if (-not $StateVolumeSet) {
+        $AgentVolume = "pi-agent-$ProfileName$(if ($InstanceName) { "-$InstanceName" })"
     }
-} elseif ($AgentVolume -eq 'pi-agent' -and $InstanceName -and -not $StateVolumeSet)
-{ $AgentVolume = "pi-agent-$InstanceName"
+}
+elseif ($AgentVolume -eq 'pi-agent' -and $InstanceName -and -not $StateVolumeSet) {
+    $AgentVolume = "pi-agent-$InstanceName"
 }
 
 Require-Podman
-if ($ShowInfo)
-{
-    Resolve-Workspace
+if ($ShowInfo) {
     Write-Output "pi-sandbox runtime configuration"
     Write-Output "  profile:             $(if ($ProfileName) { $ProfileName } else { 'default' })"
     Write-Output "  image:               $Image"
@@ -480,75 +554,93 @@ if ($ShowInfo)
     Write-Output "  allowed roots:       $(if ($AllowedRoots.Count) { $AllowedRoots -join ', ' } else { 'none configured' })"
     exit 0
 }
-if ($ShowState)
-{ if ($DryRun)
-    { Show-Command ([string[]]@('podman', 'volume', 'inspect', $AgentVolume))
-    } elseif (Podman-Exists ([string[]]@('volume', 'exists', $AgentVolume)))
-    { & podman volume inspect $AgentVolume
-    } else
-    { Write-Output "State volume '$AgentVolume' does not exist."
+if ($ShowState) {
+    if ($DryRun) {
+        Show-Command ([string[]]@('podman', 'volume', 'inspect', $AgentVolume))
+    }
+    elseif (Podman-Exists ([string[]]@('volume', 'exists', $AgentVolume))) {
+        & podman volume inspect $AgentVolume
+    }
+    else {
+        Write-Output "State volume '$AgentVolume' does not exist."
     }; exit 0
 }
-if ($ResetState)
-{ if ($DryRun)
-    { Show-Command ([string[]]@('podman', 'volume', 'rm', $AgentVolume))
-    } elseif (Podman-Exists ([string[]]@('volume', 'exists', $AgentVolume)))
-    { if (-not (Confirm "Remove Pi state volume '$AgentVolume'? This deletes saved state."))
-        { exit 1
+if ($ResetState) {
+    if ($DryRun) {
+        Show-Command ([string[]]@('podman', 'volume', 'rm', $AgentVolume))
+    }
+    elseif (Podman-Exists ([string[]]@('volume', 'exists', $AgentVolume))) {
+        if (-not (Confirm "Remove Pi state volume '$AgentVolume'? This deletes saved state.")) {
+            exit 1
         }; & podman volume rm $AgentVolume | Out-Null; Write-Output "Removed state volume '$AgentVolume'."
-    } else
-    { Write-Output "State volume '$AgentVolume' does not exist."
+    }
+    else {
+        Write-Output "State volume '$AgentVolume' does not exist."
     }; exit 0
 }
 
-if ($DryRun)
-{ Write-Output "# Require existing image: $Image"
-} elseif (-not (Podman-Exists ([string[]]@('image', 'exists', $Image))))
-{ Fail "sandbox image '$Image' does not exist; ask an administrator to create it"
+if ($DryRun) {
+    Write-Output "# Require existing image: $Image"
 }
-Resolve-Workspace
-$validatedMounts = foreach ($mount in $ExtraMounts)
-{ Parse-Mount $mount
+elseif (-not (Podman-Exists ([string[]]@('image', 'exists', $Image)))) {
+    Fail "sandbox image '$Image' does not exist; ask an administrator to create it"
 }
-if (-not $DryRun -and -not (Podman-Exists ([string[]]@('volume', 'exists', $AgentVolume))))
-{ Log "Creating Pi state volume: $AgentVolume"; & podman volume create $AgentVolume | Out-Null
+$validatedMounts = foreach ($mount in $ExtraMounts) {
+    Parse-Mount $mount
+}
+$validatedPorts = foreach ($port in $ForwardedPorts) {
+    Parse-Port $port
+}
+foreach ($extension in $PiExtensions)
+{ Test-PiExtension $extension }
+if (-not $DryRun -and -not (Podman-Exists ([string[]]@('volume', 'exists', $AgentVolume)))) {
+    Log "Creating Pi state volume: $AgentVolume"; & podman volume create $AgentVolume | Out-Null
 }
 
 $runArgs = [System.Collections.Generic.List[string]]::new()
 $runArgs.AddRange([string[]]@('run', '--rm', '--interactive', '--tty', "--userns=keep-id:uid=$ContainerUid,gid=$ContainerGid", '--cap-drop=ALL', '--security-opt=no-new-privileges', "--pids-limit=$PidsLimit", '--env', "HOME=$ContainerHome", '--env', "USER=$ContainerUser", '--env', "XDG_CONFIG_HOME=$ContainerHome/.config", '--env', "XDG_DATA_HOME=$ContainerHome/.local/share", '--env', "XDG_CACHE_HOME=$ContainerHome/.cache", '--env', "XDG_STATE_HOME=$ContainerHome/.local/state", '--env', "XDG_BIN_HOME=$ContainerHome/.local/bin", '--volume', "$HostWorkspace`:$ContainerStartDir`:rw", '--volume', "$AgentVolume`:$ContainerHome/.pi/agent:rw", '--workdir', $ContainerStartDir))
-if ($Memory)
-{ $runArgs.Add('--memory'); $runArgs.Add($Memory)
+if ($Memory) {
+    $runArgs.Add('--memory'); $runArgs.Add($Memory)
 }
-if ($Cpus)
-{ $runArgs.Add('--cpus'); $runArgs.Add($Cpus)
+if ($Cpus) {
+    $runArgs.Add('--cpus'); $runArgs.Add($Cpus)
 }
-if ($NetworkMode -eq 'none')
-{ $runArgs.Add('--network=none'); $runArgs.Add('--env'); $runArgs.Add('PI_OFFLINE=1')
+if ($NetworkMode -eq 'none') {
+    $runArgs.Add('--network=none'); $runArgs.Add('--env'); $runArgs.Add('PI_OFFLINE=1')
 }
-foreach ($mount in $validatedMounts)
-{ $runArgs.Add('--volume'); $runArgs.Add($mount)
+foreach ($mount in $validatedMounts) {
+    $runArgs.Add('--volume'); $runArgs.Add($mount)
 }
-if ($EnvFile)
-{ if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf))
-    { Fail "environment file is not readable: $EnvFile"
+foreach ($port in $validatedPorts) {
+    $runArgs.Add('--publish'); $runArgs.Add($port)
+}
+if ($EnvFile) {
+    if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
+        Fail "environment file is not readable: $EnvFile"
     }; $runArgs.Add('--env-file'); $runArgs.Add($EnvFile)
 }
-foreach ($name in @('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'))
-{ if ([Environment]::GetEnvironmentVariable($name))
-    { $runArgs.Add('--env'); $runArgs.Add($name)
+foreach ($name in @('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY')) {
+    if ([Environment]::GetEnvironmentVariable($name)) {
+        $runArgs.Add('--env'); $runArgs.Add($name)
     }
 }
-$runArgs.Add($Image)
-if ($ShellMode)
-{ $runArgs.AddRange([string[]]@('--entrypoint', '/bin/bash'))
+if ($PiExtensions.Count) {
+    Log 'Installing project-local Pi extensions'
+    $bootstrapArgs = [System.Collections.Generic.List[string]]::new(); $bootstrapArgs.AddRange($runArgs); $bootstrapArgs.AddRange([string[]]@('--entrypoint', '/bin/bash', $Image, '-lc', 'for extension in "$@"; do pi install -l "$extension"; done', 'pi')); $bootstrapArgs.AddRange($PiExtensions)
+    if ($DryRun -or $VerboseMode) { Show-Command (@('podman') + $bootstrapArgs.ToArray()) }
+    if (-not $DryRun) { & podman @bootstrapArgs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 }
-foreach ($value in $PiArgs)
-{ $runArgs.Add($value)
+$runArgs.Add($Image)
+if ($ShellMode) {
+    $runArgs.AddRange([string[]]@('--entrypoint', '/bin/bash'))
+}
+foreach ($value in $PiArgs) {
+    $runArgs.Add($value)
 }
 Log 'Starting Pi sandbox'; Write-Output "    image:     $Image"; Write-Output "    start dir:  $HostWorkspace -> $ContainerStartDir"; Write-Output "    state:     $AgentVolume"; Write-Output "    network:   $NetworkMode"
-if ($DryRun -or $VerboseMode)
-{ Show-Command (@('podman') + $runArgs.ToArray())
+if ($DryRun -or $VerboseMode) {
+    Show-Command (@('podman') + $runArgs.ToArray())
 }
-if (-not $DryRun)
-{ & podman @runArgs; exit $LASTEXITCODE
+if (-not $DryRun) {
+    & podman @runArgs; exit $LASTEXITCODE
 }

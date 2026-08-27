@@ -17,6 +17,7 @@ pi-sandbox-create --build
 pi-sandbox-create --create node-legacy --tool fnm@1.39.0 --extension fnm:node@14 --extension fnm:node@25 --env FNM_VERSION_FILE_STRATEGY=recursive
 pi-sandbox-create rust --build --pull
 pi-sandbox-create rust --regenerate-containerfile --no-cache
+pi-sandbox-create --list-images
 ```
 
 ## Profile management
@@ -37,6 +38,10 @@ pi-sandbox-create rust --regenerate-containerfile --no-cache
 - `--no-cache` — disable Podman build cache; implies `--update`.
 - `--pull` — pull a newer base image; implies `--update`.
 - `--clean-image` — remove the selected sandbox image.
+- `--list-images` — list locally available images carrying the `pi-sandbox` tag (repository, tag, ID, age, size) without building or changing them.
+
+Built and reused images are additionally tagged as `REPOSITORY:pi-sandbox`; this stable management tag, rather than a repository-name convention, selects images for `--list-images`.
+
 - `--pi-version VERSION` — Pi npm package version or dist-tag.
 - `--base-image IMAGE` — base image.
 - `--image IMAGE` — override image name.

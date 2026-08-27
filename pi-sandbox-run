@@ -29,8 +29,10 @@ XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 CONFIG_DIR="${XDG_CONFIG_HOME}/pi-sandbox"
 CONFIG_FILE="${CONFIG_DIR}/config"
 ALLOWED_ROOTS_FILE="${CONFIG_DIR}/allowed-roots"
+PROJECT_RC_FILE=""
 CONFIG_TEMPLATE="${SCRIPT_DIR}/templates/run.config.template"
 ALLOWED_ROOTS_TEMPLATE="${SCRIPT_DIR}/templates/allowed-roots.template"
+PROJECT_RC_TEMPLATE="${SCRIPT_DIR}/templates/pisandboxrc.template"
 
 IMAGE="pi-sandbox:latest"
 CONTAINER_USER="pi"
@@ -52,11 +54,18 @@ HOST_WORKSPACE=""
 SHELL_MODE=0
 DRY_RUN=0
 SHOW_INFO=0
+LIST_IMAGES=0
+INIT_PROJECT_CONFIG=0
 SHOW_STATE=0
 RESET_STATE=0
 YES=0
 STATE_VOLUME_SET=0
 EXTRA_MOUNTS=()
+FORWARDED_PORTS=()
+PI_EXTENSIONS=()
+CLI_EXTRA_MOUNTS=()
+CLI_FORWARDED_PORTS=()
+CLI_INSTANCE_NAME=""
 ALLOWED_ROOTS=()
 PI_ARGS=()
 
@@ -188,6 +197,50 @@ load_allowed_roots() {
     done < "$ALLOWED_ROOTS_FILE"
 }
 
+load_project_config() {
+    local line key value lineno=0 name_set=0
+    PROJECT_RC_FILE="${HOST_WORKSPACE}/.pisandboxrc"
+    [[ -e "$PROJECT_RC_FILE" ]] || return 0
+    [[ -f "$PROJECT_RC_FILE" && ! -L "$PROJECT_RC_FILE" && -r "$PROJECT_RC_FILE" ]] || { err "Project configuration must be a readable, non-symlinked file: $PROJECT_RC_FILE"; exit 2; }
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((++lineno)); line="$(trim "$line")"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == *=* ]] || { err "$PROJECT_RC_FILE:$lineno: expected KEY=VALUE"; exit 2; }
+        key="$(trim "${line%%=*}")"; value="$(trim "${line#*=}")"
+        if [[ "$value" == \"*\" && "$value" == *\" ]]; then value="${value:1:${#value}-2}"; fi
+        if [[ "$value" == \'*\' && "$value" == *\' ]]; then value="${value:1:${#value}-2}"; fi
+        case "$key" in
+            NAME) (( ! name_set )) || { err "$PROJECT_RC_FILE:$lineno: NAME may only be specified once"; exit 2; }; INSTANCE_NAME="$value"; name_set=1 ;;
+            PORT) FORWARDED_PORTS+=("$value") ;;
+            MOUNT) [[ "$value" == ./*:* ]] && value="${HOST_WORKSPACE}/${value#./}"; EXTRA_MOUNTS+=("$value") ;;
+            PI_EXTENSION) PI_EXTENSIONS+=("$value") ;;
+            *) err "$PROJECT_RC_FILE:$lineno: unsupported project config key '$key'"; exit 2 ;;
+        esac
+    done < "$PROJECT_RC_FILE"
+}
+
+validate_port_spec() {
+    local spec="$1" host container protocol="tcp"
+    [[ "$spec" =~ ^([0-9]{1,5}):([0-9]{1,5})(/(tcp|udp))?$ ]] || { err "Invalid port '$spec'; expected HOST_PORT:CONTAINER_PORT[/tcp|udp]"; return 1; }
+    host="${BASH_REMATCH[1]}"; container="${BASH_REMATCH[2]}"; protocol="${BASH_REMATCH[4]:-tcp}"
+    (( 10#$host >= 1 && 10#$host <= 65535 && 10#$container >= 1 && 10#$container <= 65535 )) || { err "Port numbers must be between 1 and 65535: $spec"; return 1; }
+    VALIDATED_PATH="${host}:${container}/${protocol}"
+}
+
+validate_pi_extension() {
+    local spec="$1" source canonical
+    [[ -n "$spec" && "$spec" != *$'\n'* && "$spec" != -* ]] || { err "Invalid PI_EXTENSION '$spec'"; return 1; }
+    case "$spec" in
+        npm:*|git:*|http://*|https://*) return 0 ;;
+        ./*)
+            source="${HOST_WORKSPACE}/${spec#./}"
+            canonical="$(canonical_existing_path "$source")" || { err "Local PI_EXTENSION does not exist: $spec"; return 1; }
+            [[ "$canonical" == "$HOST_WORKSPACE"/* ]] || { err "Local PI_EXTENSION must stay within workspace: $spec"; return 1; }
+            ;;
+        *) err "PI_EXTENSION must be npm:, git:, http(s):, or a workspace-relative ./ path: $spec"; return 1 ;;
+    esac
+}
+
 load_config() {
     [[ -f "$CONFIG_FILE" ]] || { write_default_config; return 0; }
     local line key value lineno=0
@@ -217,6 +270,34 @@ load_config() {
             *) err "$CONFIG_FILE:$lineno: unsupported config key '$key'"; exit 2 ;;
         esac
     done < "$CONFIG_FILE"
+}
+
+list_images() {
+    podman image ls --format '{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}' |
+        awk -F '\t' '$2 == "pi-sandbox" { printf "- %-35s %-17s %-13s %-12s %s\n", $1, $2, $3, $4, $5 }'
+}
+
+init_project_config() {
+    local target="${HOST_WORKSPACE}/.pisandboxrc"
+
+    [[ ! -e "$target" && ! -L "$target" ]] || { err "Project config already exists: $target"; return 1; }
+    [[ -r "$PROJECT_RC_TEMPLATE" ]] || { err "Template not found: $PROJECT_RC_TEMPLATE"; return 1; }
+    [[ -z "$CLI_INSTANCE_NAME" || "$CLI_INSTANCE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+        err "Invalid sandbox name '$CLI_INSTANCE_NAME'"; return 1
+    }
+    if [[ -n "$CLI_INSTANCE_NAME" ]]; then
+        if (( DRY_RUN )); then
+            printf '+ create %q with NAME=%q\n' "$target" "$CLI_INSTANCE_NAME"
+        else
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                if [[ "$line" == '# NAME='* ]]; then printf 'NAME=%s\n' "$CLI_INSTANCE_NAME"; else printf '%s\n' "$line"; fi
+            done < "$PROJECT_RC_TEMPLATE" > "$target"
+            log "Created project config: $target"
+        fi
+    else
+        run_cmd cp "$PROJECT_RC_TEMPLATE" "$target" || return 1
+        (( DRY_RUN )) || log "Created project config: $target"
+    fi
 }
 
 require_podman() {
@@ -381,9 +462,10 @@ fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --) shift; PI_ARGS+=("$@"); break ;;
-        --name) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; INSTANCE_NAME="$2"; shift ;;
+        --name) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; CLI_INSTANCE_NAME="$2"; shift ;;
         --workspace) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; HOST_WORKSPACE="$2"; shift ;;
-        --mount) [[ $# -ge 2 ]] || { err "$1 requires SPEC"; exit 2; }; EXTRA_MOUNTS+=("$2"); shift ;;
+        --mount) [[ $# -ge 2 ]] || { err "$1 requires SPEC"; exit 2; }; CLI_EXTRA_MOUNTS+=("$2"); shift ;;
+        --port) [[ $# -ge 2 ]] || { err "$1 requires SPEC"; exit 2; }; CLI_FORWARDED_PORTS+=("$2"); shift ;;
         --env-file) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; ENV_FILE="$2"; shift ;;
         --state-volume) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; AGENT_VOLUME="$2"; STATE_VOLUME_SET=1; shift ;;
         --memory) [[ $# -ge 2 ]] || { err "$1 requires SIZE"; exit 2; }; MEMORY="$2"; shift ;;
@@ -395,6 +477,8 @@ while [[ $# -gt 0 ]]; do
         --show-state) SHOW_STATE=1 ;;
         --reset-state) RESET_STATE=1 ;;
         --info) SHOW_INFO=1 ;;
+        --list-images) LIST_IMAGES=1 ;;
+        --init) INIT_PROJECT_CONFIG=1 ;;
         --dry-run) DRY_RUN=1 ;;
         --verbose|--debug) VERBOSE=1 ;;
         --yes|-y) YES=1 ;;
@@ -410,6 +494,22 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if (( LIST_IMAGES )); then
+    require_podman
+    list_images
+    exit 0
+fi
+
+resolve_workspace || exit 2
+if (( INIT_PROJECT_CONFIG )); then
+    init_project_config || exit 1
+    exit 0
+fi
+load_project_config
+[[ -n "$CLI_INSTANCE_NAME" ]] && INSTANCE_NAME="$CLI_INSTANCE_NAME"
+EXTRA_MOUNTS+=("${CLI_EXTRA_MOUNTS[@]}")
+FORWARDED_PORTS+=("${CLI_FORWARDED_PORTS[@]}")
 
 [[ -z "$PROFILE" || "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid profile name '$PROFILE'"; exit 2; }
 [[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid sandbox name '$INSTANCE_NAME'"; exit 2; }
@@ -428,7 +528,6 @@ fi
 require_podman
 
 if (( SHOW_INFO )); then
-    resolve_workspace || exit 2
     echo "Pi-sandbox runtime configuration"
     printf '  profile:             %s\n' "${PROFILE:-default}"
     printf '  image:               %s\n' "$IMAGE"
@@ -438,6 +537,9 @@ if (( SHOW_INFO )); then
     printf '  state volume:        %s\n' "$AGENT_VOLUME"
     printf '  network:             %s\n' "$NETWORK_MODE"
     printf '  extra mounts:        %s\n' "${EXTRA_MOUNTS[*]:-none}"
+    printf '  forwarded ports:     %s\n' "${FORWARDED_PORTS[*]:-none}"
+    printf '  project config:      %s\n' "$PROJECT_RC_FILE"
+    printf '  Pi extensions:       %s\n' "${PI_EXTENSIONS[*]:-none}"
     printf '  allowed-roots file:  %s\n' "$ALLOWED_ROOTS_FILE"
     printf '  allowed roots:       %s\n' "${ALLOWED_ROOTS[*]:-none}"
     if command -v podman >/dev/null 2>&1 && podman image exists "$IMAGE" 2>/dev/null; then
@@ -484,12 +586,18 @@ elif ! podman image exists "$IMAGE"; then
     exit 1
 fi
 
-resolve_workspace || exit 2
-
 VALIDATED_MOUNTS=()
+VALIDATED_PORTS=()
 for mount in "${EXTRA_MOUNTS[@]}"; do
     validate_mount_spec "$mount" || exit 2
     VALIDATED_MOUNTS+=("$VALIDATED_PATH")
+done
+for port in "${FORWARDED_PORTS[@]}"; do
+    validate_port_spec "$port" || exit 2
+    VALIDATED_PORTS+=("$VALIDATED_PATH")
+done
+for extension in "${PI_EXTENSIONS[@]}"; do
+    validate_pi_extension "$extension" || exit 2
 done
 
 if (( ! DRY_RUN )) && ! podman volume exists "$AGENT_VOLUME"; then
@@ -524,6 +632,9 @@ RUN_ARGS=(
 for mount in "${VALIDATED_MOUNTS[@]}"; do
     RUN_ARGS+=(--volume "$mount")
 done
+for port in "${VALIDATED_PORTS[@]}"; do
+    RUN_ARGS+=(--publish "$port")
+done
 
 if [[ -n "$ENV_FILE" ]]; then
     [[ -r "$ENV_FILE" ]] || { err "Environment file is not readable: $ENV_FILE"; exit 1; }
@@ -533,6 +644,11 @@ fi
 for var in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; do
     [[ -n "${!var:-}" ]] && RUN_ARGS+=(--env "$var")
 done
+
+if ((${#PI_EXTENSIONS[@]})); then
+    log "Installing project-local Pi extensions"
+    run_cmd podman run "${RUN_ARGS[@]}" --entrypoint /bin/bash "$IMAGE" -lc 'for extension in "$@"; do pi install -l "$extension"; done' pi "${PI_EXTENSIONS[@]}"
+fi
 
 log "Starting Pi sandbox"
 echo "    image:     $IMAGE"

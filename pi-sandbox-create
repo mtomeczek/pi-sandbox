@@ -54,6 +54,7 @@ PULL=0
 REGENERATE_CONTAINERFILE=0
 DRY_RUN=0
 SHOW_INFO=0
+LIST_IMAGES=0
 CLEAN_IMAGE=0
 YES=0
 TOOL_SPECS=()
@@ -314,6 +315,19 @@ write_containerfile() {
     rm -f "$snippets"; trap - RETURN
 }
 
+sandbox_tag_ref() {
+    local last_component="${IMAGE##*/}" repository="$IMAGE"
+    [[ "$last_component" == *:* ]] && repository="${IMAGE%:*}"
+    printf '%s:pi-sandbox\n' "$repository"
+}
+
+tag_image() { run_cmd podman tag "$IMAGE" "$(sandbox_tag_ref)"; }
+
+list_images() {
+    podman image ls --format '{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}' |
+        awk -F '\t' '$2 == "pi-sandbox" { printf "- %-35s %-17s %-13s %-12s %s\n", $1, $2, $3, $4, $5 }'
+}
+
 require_podman() {
     command -v podman >/dev/null 2>&1 || { err "Podman is not installed or not in PATH"; exit 1; }
     (( DRY_RUN )) && return 0
@@ -333,6 +347,7 @@ build_image() {
     (( NO_CACHE )) && build_args+=(--no-cache)
     (( PULL )) && build_args+=(--pull=always)
     run_cmd podman build "${build_args[@]}" "$context"
+    tag_image
     rm -rf "$context"; trap - RETURN
 }
 
@@ -380,6 +395,7 @@ while [[ $# -gt 0 ]]; do
         --container-gid) [[ $# -ge 2 ]] || { err "$1 requires GID"; exit 2; }; CONTAINER_GID="$2"; shift ;;
         --config) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; CONFIG_FILE="$2"; shift ;;
         --info) SHOW_INFO=1 ;;
+        --list-images) LIST_IMAGES=1 ;;
         --dry-run) DRY_RUN=1 ;;
         --verbose|--debug) VERBOSE=1 ;;
         --yes|-y) YES=1 ;;
@@ -425,6 +441,11 @@ fi
 
 require_podman
 
+if (( LIST_IMAGES )); then
+    list_images
+    exit 0
+fi
+
 if (( CLEAN_IMAGE )); then
     if (( DRY_RUN )); then
         echo "+ podman image rm $(printf '%q' "$IMAGE")"
@@ -452,6 +473,7 @@ elif (( BUILD )); then
         build_image
     else
         log "Image already exists: $IMAGE"
+        tag_image
     fi
 else
     log "No build requested. Use --build or --update."

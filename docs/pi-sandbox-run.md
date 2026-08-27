@@ -16,6 +16,9 @@ pi-sandbox-run rust
 pi-sandbox-run rust --name backend
 pi-sandbox-run rust --mount ~/src/shared-libs:/src:ro
 pi-sandbox-run rust --mount ./shared-libs:/src:ro
+pi-sandbox-run rust --port 3000:3000
+pi-sandbox-run --list-images
+pi-sandbox-run --init
 pi-sandbox-run rust -- --help
 ```
 
@@ -24,6 +27,7 @@ pi-sandbox-run rust -- --help
 - `--name NAME` — sandbox instance name; changes the persistent state volume.
 - `--workspace DIRECTORY` — host directory mounted as the starting directory. Defaults to the current directory. It must satisfy the host-directory restrictions below. Inside the container it is mounted under `$CONTAINER_HOME` with the same basename.
 - `--mount SPEC` — add a bind mount; repeatable. Format: `HOST:CONTAINER[:ro|rw]`. Both paths are validated as described below.
+- `--port SPEC` — publish a container port; repeatable. Format: `HOST_PORT:CONTAINER_PORT[/tcp|udp]`.
 - `--env-file FILE` — pass an environment file to Podman.
 - `--state-volume NAME` — override the persistent Pi state volume.
 - `--memory SIZE` — container memory limit, for example `4g`.
@@ -42,10 +46,40 @@ Install or remove the user-local command symlinks with `pi-sandbox-setup`. See `
 - `--show-state` — show persistent state-volume information.
 - `--reset-state` — delete persistent Pi state after confirmation.
 - `--info` — show resolved runtime configuration.
+- `--list-images` — list locally available images carrying the `pi-sandbox` tag (repository, tag, ID, age, size) without starting one. The administrator's creator assigns this tag when it builds or reuses an image.
+- `--init` — create the standard `.pisandboxrc` in the resolved workspace. With `--name NAME`, it writes `NAME=NAME` into that file. It refuses to overwrite an existing path and does not require Podman.
 - `--dry-run` — print actions without executing them.
 - `--verbose`, `--debug` — print detailed commands and diagnostics.
 - `-y`, `--yes` — assume yes for confirmations.
 - `-h`, `--help` — show this help.
+
+## Project startup configuration
+
+If the resolved workspace contains a readable, non-symlinked `.pisandboxrc`, it
+is applied before the sandbox starts. This makes shareable project startup
+settings explicit without executing repository-controlled shell code:
+
+```ini
+NAME=backend
+PORT=3000:3000
+PORT=9229:9229/tcp
+MOUNT=./shared-libs:/src/shared:ro
+PI_EXTENSION=npm:@acme/pi-tools@1.2.3
+PI_EXTENSION=./tools/local-pi-package
+```
+
+`NAME` is allowed once. `PORT`, `MOUNT`, and `PI_EXTENSION` are repeatable.
+Global configuration is applied first, then `.pisandboxrc`, then CLI options;
+therefore `--name` wins over `NAME`, while CLI mounts and ports are appended.
+
+Each port number must be from 1 through 65535. Extensions are installed with
+`pi install -l` in the workspace before Pi starts, so Pi records them in
+`.pi/settings.json` and keeps packages project-local. Extension sources must be
+`npm:`, `git:`, `http(s):`, or an existing workspace-relative `./` path. Since
+Pi extensions run with full permissions, review and trust every declared
+source. `--dry-run` prints the install command without running it.
+
+Run `pi-sandbox-run --init` to copy the standard template into the resolved workspace. Add `--name backend` to write `NAME=backend` into the new file. It refuses to replace an existing `.pisandboxrc`. You can also use `templates/pisandboxrc.template` directly.
 
 ## Starting directory
 

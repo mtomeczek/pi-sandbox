@@ -233,6 +233,25 @@ empty components, and symlinks are rejected. For example:
 /mnt/shared/customer-a
 ```
 
+### Project-local startup settings
+
+A workspace can commit `.pisandboxrc` to declare a sandbox name, repeatable port
+forwards and extra mounts, plus Pi package sources to install into that
+workspace's `.pi/settings.json`:
+
+```ini
+NAME=backend
+PORT=3000:3000
+MOUNT=./shared-libs:/src/shared:ro
+PI_EXTENSION=npm:@acme/pi-tools@1.2.3
+```
+
+The launcher parses this as data, never as shell code. CLI values take
+precedence for the name and append after project ports/mounts. See
+[`docs/pi-sandbox-run.md`](docs/pi-sandbox-run.md#project-startup-configuration)
+and [`templates/pisandboxrc.template`](templates/pisandboxrc.template) for the
+complete contract.
+
 Run with no network:
 
 ```bash
