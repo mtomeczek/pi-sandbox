@@ -35,9 +35,9 @@ It falls back to `%USERPROFILE%\AppData\Roaming\pi-sandbox` if `%APPDATA%` is un
 ## Options
 
 - `--create PROFILE` — create or update a profile manifest.
-- `--tool TOOL@VERSION` — repeatable tool: `go`, `rust`, `jvm`, `uv`, `fnm`, or `python`.
+- `--tool TOOL@VERSION` — repeatable tool: `go`, `rust`, `jvm`, `uv`, `fnm`, `python`, or `caddy`. Caddy downloads its requested release into the Pi user's XDG bin directory.
 - `--extension TYPE:SPEC` — repeatable extension: `rustup:COMPONENT`, `cargo:CRATE[@VERSION]`, `uv:PACKAGE[@VERSION]`, or `fnm:node@VERSION`.
-- `--npm PACKAGE[@VERSION]`, `--env NAME=VALUE`, `--path DIRECTORY`, `--apt PACKAGE` — repeatable profile directives.
+- `--npm PACKAGE[@VERSION]`, `--env NAME=VALUE`, `--path DIRECTORY`, `--apt PACKAGE`, `--shell-command COMMAND` — repeatable profile directives. Shell commands must be trusted, one-line commands and run as the Pi user during image build.
 - `--build`, `--update`, `--regenerate-containerfile`, `--no-cache`, `--pull`, `--clean-image`, `--list-images` — image actions. The creator assigns managed images a `pi-sandbox` tag; `--list-images` selects only that tag.
 - `--pi-version VERSION`, `--base-image IMAGE`, `--image IMAGE`, `--container-user NAME`, `--container-uid UID`, `--container-gid GID` — build settings.
 - `--info`, `--dry-run`, `--verbose` / `--debug`, `--yes` / `-y`, `--help` / `-h` — inspection and control options.

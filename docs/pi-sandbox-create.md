@@ -23,12 +23,13 @@ pi-sandbox-create --list-images
 ## Profile management
 
 - `--create PROFILE` — create or update a versioned profile manifest.
-- `--tool TOOL@VERSION` — add a tool; repeatable. Supported tools: `go`, `rust`, `jvm`, `uv`, `fnm`, `python`. Node for Pi comes exclusively from `--base-image`.
+- `--tool TOOL@VERSION` — add a tool; repeatable. Supported tools: `go`, `rust`, `jvm`, `uv`, `fnm`, `python`, `caddy`. Caddy downloads its requested release into the Pi user's XDG bin directory. Node for Pi comes exclusively from `--base-image`.
 - `--extension TYPE:SPEC` — add an extension; repeatable. Supported extensions: `rustup:COMPONENT`, `cargo:CRATE[@VERSION]`, `uv:PACKAGE[@VERSION]`, `fnm:node@VERSION`. The FNM Node extension requires `--tool fnm@VERSION` and installs only under the Pi user's FNM tree.
 - `--npm PACKAGE[@VERSION]` — install a global npm command-line package; repeatable. Scoped packages such as `@angular/cli@20.3.9` are supported.
 - `--env NAME=VALUE` — add an environment variable to the manifest.
 - `--path DIRECTORY` — prepend a directory to `PATH` from the manifest.
 - `--apt PACKAGE` — add an APT package to the image; repeatable.
+- `--shell-command COMMAND` — add a trusted, one-line shell command to run during the image build as the Pi user; repeatable. Commands are persisted in the profile and emitted as Containerfile `RUN` instructions. Use `--apt` for root-level Debian package installation.
 
 ## Build options
 

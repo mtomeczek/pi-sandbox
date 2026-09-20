@@ -19,7 +19,7 @@
 #
 # TOOL=name@version
 #   Toolchain to install into the image. Repeatable.
-#   Supported tools: go, rust, jvm, uv, fnm, python.
+#   Supported tools: go, rust, jvm, uv, fnm, python, caddy.
 #   Node is not a tool directive: use BASE_IMAGE for Pi's Node and FNM
 #   extensions for project Nodes.
 #   Examples:
@@ -27,6 +27,7 @@
 #     TOOL=uv@0.8.9
 #     TOOL=python@3.13.7
 #     TOOL=fnm@1.39.0
+#     TOOL=caddy@2.10.0
 #   Note: python@VERSION requires a uv@VERSION tool in the same profile.
 #   fnm versions may be written with or without the leading "v" release prefix.
 #
@@ -56,6 +57,11 @@
 #   Directory prepended to PATH in the image. Repeatable.
 #   The value may reference environment variables defined by tools.
 #   Example: PATH=${CARGO_HOME}/bin
+#
+# SHELL_COMMAND=command
+#   Trusted one-line shell command executed during the image build as the Pi
+#   user. Repeatable. Use APT for root-level Debian package installation.
+#   Example: SHELL_COMMAND=go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.29.0
 #
 # APT=package
 #   Debian package installed during image build. Repeatable.

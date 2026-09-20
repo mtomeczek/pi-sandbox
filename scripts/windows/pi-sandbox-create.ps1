@@ -23,7 +23,7 @@ $Image = 'pi-sandbox:latest'; $BaseImage = 'node:24-bookworm-slim'; $PiVersion =
 $ContainerUser = 'pi'; $ContainerUid = '1000'; $ContainerGid = '1000'; $VerboseMode = $false
 $ProfileName = ''; $ProfileFile = ''; $Containerfile = Join-Path $ContainerfileDir 'Containerfile.pi-sandbox'
 $CreateProfile = $false; $Build = $false; $Update = $false; $NoCache = $false; $Pull = $false; $Regenerate = $false; $DryRun = $false; $ShowInfo = $false; $ListImages = $false; $CleanImage = $false; $Yes = $false
-$ToolSpecs = [Collections.Generic.List[string]]::new(); $ExtensionSpecs = [Collections.Generic.List[string]]::new(); $NpmSpecs = [Collections.Generic.List[string]]::new(); $ManifestEnvs = [Collections.Generic.List[string]]::new(); $ManifestPaths = [Collections.Generic.List[string]]::new(); $ManifestApt = [Collections.Generic.List[string]]::new()
+$ToolSpecs = [Collections.Generic.List[string]]::new(); $ExtensionSpecs = [Collections.Generic.List[string]]::new(); $NpmSpecs = [Collections.Generic.List[string]]::new(); $ManifestEnvs = [Collections.Generic.List[string]]::new(); $ManifestPaths = [Collections.Generic.List[string]]::new(); $ManifestApt = [Collections.Generic.List[string]]::new(); $ManifestShellCommands = [Collections.Generic.List[string]]::new()
 
 function Fail([string]$Message) {
     throw "error: $Message"
@@ -32,7 +32,7 @@ function Log([string]$Message) {
     Write-Output "==> $Message"
 }
 function Test-Tool([string]$Name) {
-    return $Name -in @('go', 'rust', 'jvm', 'uv', 'fnm', 'python')
+    return $Name -in @('go', 'rust', 'jvm', 'uv', 'fnm', 'python', 'caddy')
 }
 function Test-NpmSpec([string]$Spec) {
     if ($Spec -notmatch '^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._+~-]*)?$') {
@@ -151,6 +151,8 @@ function Write-Manifest {
         $lines.Add("PATH=$x")
     }; foreach ($x in $ManifestApt) {
         $lines.Add("APT=$x")
+    }; foreach ($x in $ManifestShellCommands) {
+        $lines.Add("SHELL_COMMAND=$x")
     }
     [IO.File]::WriteAllText($ProfileFile, ($lines -join "`n") + "`n"); Log "Wrote manifest $ProfileFile"
 }
@@ -158,7 +160,7 @@ function Import-Manifest {
     $script:ProfileFile = Join-Path $ProfilesDir "$ProfileName.profile"; if (-not (Test-Path -LiteralPath $ProfileFile)) {
         Fail "profile '$ProfileName' does not exist ($ProfileFile)"
     }
-    $ToolSpecs.Clear(); $ExtensionSpecs.Clear(); $NpmSpecs.Clear(); $ManifestEnvs.Clear(); $ManifestPaths.Clear(); $ManifestApt.Clear()
+    $ToolSpecs.Clear(); $ExtensionSpecs.Clear(); $NpmSpecs.Clear(); $ManifestEnvs.Clear(); $ManifestPaths.Clear(); $ManifestApt.Clear(); $ManifestShellCommands.Clear()
     foreach ($raw in Get-Content -LiteralPath $ProfileFile) {
         $line = $raw.Trim(); if (-not $line -or $line.StartsWith('#')) {
             continue
@@ -185,6 +187,8 @@ function Import-Manifest {
                 $ManifestPaths.Add($value)
             }; 'APT' {
                 $ManifestApt.Add($value)
+            }; 'SHELL_COMMAND' {
+                $ManifestShellCommands.Add($value)
             }; default {
                 Fail "${ProfileFile}: unsupported key '$key'"
             }
@@ -246,6 +250,8 @@ function Write-Containerfile {
                 }; Add-Snippet $snippets python @{VERSION = $version }
             }; 'fnm' {
                 Add-Snippet $snippets fnm @{VERSION = $version.TrimStart('v') }
+            }; 'caddy' {
+                Add-Snippet $snippets caddy @{VERSION = $version.TrimStart('v') }
             }
         }
     }
@@ -271,6 +277,10 @@ function Write-Containerfile {
                 Add-Snippet $snippets 'extension-fnm-node' @{VERSION = $spec.Substring(9) }
             }
         }
+    }
+    foreach ($spec in $ManifestShellCommands) {
+        if (-not $spec -or $spec -match "[\r\n]") { Fail 'shell command must be one non-empty line' }
+        Add-Snippet $snippets 'shell-command' @{COMMAND = $spec }
     }
     foreach ($spec in $ManifestEnvs) {
         $name, $value = $spec -split '=', 2; if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
@@ -349,6 +359,8 @@ while ($idx -lt $args.Count) {
             $idx++; $ManifestPaths.Add($args[$idx])
         }; '--apt' {
             $idx++; $ManifestApt.Add($args[$idx])
+        }; '--shell-command' {
+            $idx++; $ManifestShellCommands.Add($args[$idx])
         }; '--build' {
             $Build = $true
         }; '--update' {
