@@ -16,6 +16,7 @@ RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSIO
     && npm cache clean --force \
     && command -v pi \
     && pi --version
+{{ROOT_DYNAMIC_SNIPPETS}}
 
 # Create the unprivileged runtime user before installing language/tool managers.
 RUN set -eux; \

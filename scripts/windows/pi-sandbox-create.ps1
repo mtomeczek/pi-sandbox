@@ -32,10 +32,10 @@ function Log([string]$Message) {
     Write-Output "==> $Message"
 }
 function Test-Tool([string]$Name) {
-    return $Name -in @('go', 'rust', 'jvm', 'uv', 'fnm', 'python', 'caddy')
+    return $Name -in @('go', 'rust', 'jvm', 'uv', 'fnm', 'python', 'caddy', 'playwright')
 }
 function Test-NpmSpec([string]$Spec) {
-    if ($Spec -notmatch '^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._+~-]*)?$') {
+    if ($Spec -notmatch '^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[-^~A-Za-z0-9][-A-Za-z0-9._+~^]*)?$') {
         Fail "invalid npm package '$Spec' (expected PACKAGE[@VERSION])"
     }
 }
@@ -233,7 +233,7 @@ function Write-Containerfile {
     foreach ($spec in $NpmSpecs) {
         Test-NpmSpec $spec
     }
-    $snippets = [Collections.Generic.List[string]]::new()
+    $snippets = [Collections.Generic.List[string]]::new(); $rootSnippets = [Collections.Generic.List[string]]::new()
     foreach ($spec in $ToolSpecs) {
         $tool, $version = $spec -split '@', 2; switch ($tool) {
             'go' {
@@ -252,6 +252,8 @@ function Write-Containerfile {
                 Add-Snippet $snippets fnm @{VERSION = $version.TrimStart('v') }
             }; 'caddy' {
                 Add-Snippet $snippets caddy @{VERSION = $version.TrimStart('v') }
+            }; 'playwright' {
+                Add-Snippet $rootSnippets playwright @{VERSION = $version }
             }
         }
     }
@@ -289,7 +291,7 @@ function Write-Containerfile {
     }; foreach ($spec in $ManifestPaths) {
         $snippets.Add("ENV PATH=`"$spec`${PATH}`"")
     }
-    $apt = ($ManifestApt | ForEach-Object { "      $_ \" }) -join "`n"; $text = [IO.File]::ReadAllText($ContainerfileTemplate).Replace('{{DYNAMIC_SNIPPETS}}', ($snippets -join "`n")).Replace('{{APT_PACKAGES}}', $apt); [IO.Directory]::CreateDirectory($ContainerfileDir) | Out-Null; [IO.File]::WriteAllText($Containerfile, $text)
+    $apt = ($ManifestApt | ForEach-Object { "      $_ \" }) -join "`n"; $text = [IO.File]::ReadAllText($ContainerfileTemplate).Replace('{{ROOT_DYNAMIC_SNIPPETS}}', ($rootSnippets -join "`n")).Replace('{{DYNAMIC_SNIPPETS}}', ($snippets -join "`n")).Replace('{{APT_PACKAGES}}', $apt); [IO.Directory]::CreateDirectory($ContainerfileDir) | Out-Null; [IO.File]::WriteAllText($Containerfile, $text)
 }
 function Assert-Podman {
     if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {

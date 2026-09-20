@@ -19,7 +19,7 @@
 #
 # TOOL=name@version
 #   Toolchain to install into the image. Repeatable.
-#   Supported tools: go, rust, jvm, uv, fnm, python, caddy.
+#   Supported tools: go, rust, jvm, uv, fnm, python, caddy, playwright.
 #   Node is not a tool directive: use BASE_IMAGE for Pi's Node and FNM
 #   extensions for project Nodes.
 #   Examples:
@@ -28,8 +28,11 @@
 #     TOOL=python@3.13.7
 #     TOOL=fnm@1.39.0
 #     TOOL=caddy@2.10.0
+#     TOOL=playwright@1.55.0
 #   Note: python@VERSION requires a uv@VERSION tool in the same profile.
 #   fnm versions may be written with or without the leading "v" release prefix.
+#   Playwright installs its CLI, Chromium/Firefox/WebKit browsers with system
+#   dependencies, and the @playwright/mcp server.
 #
 # EXTENSION=type:spec
 #   Additional component/package installed after tools. Repeatable.

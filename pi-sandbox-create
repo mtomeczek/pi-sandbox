@@ -111,14 +111,14 @@ trim() {
 
 tool_known() {
     case "$1" in
-        go|rust|jvm|uv|fnm|python|caddy) return 0 ;;
+        go|rust|jvm|uv|fnm|python|caddy|playwright) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 validate_npm_spec() {
     local spec="$1"
-    [[ "$spec" =~ ^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._+~-]*)?$ ]] || {
+    [[ "$spec" =~ ^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[-^~A-Za-z0-9][-A-Za-z0-9._+~^]*)?$ ]] || {
         err "Invalid npm package '$spec' (expected PACKAGE[@VERSION])"
         return 1
     }
@@ -266,8 +266,9 @@ write_containerfile() {
     done
     for spec in "${NPM_SPECS[@]}"; do validate_npm_spec "$spec" || exit 2; done
 
-    local snippets; snippets="$(mktemp)" || { err "Cannot create temporary snippet file"; exit 1; }
-    trap 'rm -f "${snippets:-}"' RETURN
+    local snippets root_snippets; snippets="$(mktemp)" || { err "Cannot create temporary snippet file"; exit 1; }
+    root_snippets="$(mktemp)" || { rm -f "$snippets"; err "Cannot create temporary snippet file"; exit 1; }
+    trap 'rm -f "${snippets:-}" "${root_snippets:-}"' RETURN
 
     for spec in "${TOOL_SPECS[@]}"; do
         tool="${spec%%@*}"; version="${spec#*@}"
@@ -276,6 +277,7 @@ write_containerfile() {
           python) [[ -n "$uv_version" ]] || { err "Python@${version} requires uv; add --tool uv@VERSION"; exit 2; }; append_snippet "$snippets" python "VERSION=$version" ;;
           fnm) append_snippet "$snippets" fnm "VERSION=${version#v}" ;;
           caddy) append_snippet "$snippets" caddy "VERSION=${version#v}" ;;
+          playwright) append_snippet "$root_snippets" playwright "VERSION=$version" ;;
         esac
     done
 
@@ -316,11 +318,12 @@ write_containerfile() {
         line="${line%$'\r'}"
         case "$line" in
           '{{APT_PACKAGES}}') if ((${#MANIFEST_APT[@]})); then printf '      %s \\\n' "${MANIFEST_APT[@]}"; fi ;;
+          '{{ROOT_DYNAMIC_SNIPPETS}}') cat "$root_snippets" ;;
           '{{DYNAMIC_SNIPPETS}}') cat "$snippets" ;;
           *) printf '%s\n' "$line" ;;
         esac
     done < "$CONTAINERFILE_TEMPLATE" > "$CONTAINERFILE"
-    rm -f "$snippets"; trap - RETURN
+    rm -f "$snippets" "$root_snippets"; trap - RETURN
 }
 
 sandbox_tag_ref() {

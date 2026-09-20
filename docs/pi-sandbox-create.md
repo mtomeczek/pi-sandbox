@@ -23,9 +23,9 @@ pi-sandbox-create --list-images
 ## Profile management
 
 - `--create PROFILE` — create or update a versioned profile manifest.
-- `--tool TOOL@VERSION` — add a tool; repeatable. Supported tools: `go`, `rust`, `jvm`, `uv`, `fnm`, `python`, `caddy`. Caddy downloads its requested release into the Pi user's XDG bin directory. Node for Pi comes exclusively from `--base-image`.
+- `--tool TOOL@VERSION` — add a tool; repeatable. Supported tools: `go`, `rust`, `jvm`, `uv`, `fnm`, `python`, `caddy`, `playwright`. Caddy downloads its requested release into the Pi user's XDG bin directory. Playwright installs its CLI, Chromium/Firefox/WebKit browsers with dependencies, and `@playwright/mcp`. Node for Pi comes exclusively from `--base-image`.
 - `--extension TYPE:SPEC` — add an extension; repeatable. Supported extensions: `rustup:COMPONENT`, `cargo:CRATE[@VERSION]`, `uv:PACKAGE[@VERSION]`, `fnm:node@VERSION`. The FNM Node extension requires `--tool fnm@VERSION` and installs only under the Pi user's FNM tree.
-- `--npm PACKAGE[@VERSION]` — install a global npm command-line package; repeatable. Scoped packages such as `@angular/cli@20.3.9` are supported.
+- `--npm PACKAGE[@VERSION]` — install a global npm command-line package; repeatable. Scoped packages such as `@angular/cli@20.3.9` and version ranges such as `playwright@^1.55.0` are supported.
 - `--env NAME=VALUE` — add an environment variable to the manifest.
 - `--path DIRECTORY` — prepend a directory to `PATH` from the manifest.
 - `--apt PACKAGE` — add an APT package to the image; repeatable.
