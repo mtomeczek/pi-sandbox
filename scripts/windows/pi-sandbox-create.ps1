@@ -189,6 +189,7 @@ function Import-Manifest {
                 $ManifestApt.Add($value)
             }; 'SHELL_COMMAND' {
                 $ManifestShellCommands.Add($value)
+            }; 'ENV_SECRET' {
             }; default {
                 Fail "${ProfileFile}: unsupported key '$key'"
             }
@@ -473,4 +474,3 @@ if ($Update -or $Build) {
 else {
     Log 'No build requested. Use --build or --update.'
 }
-

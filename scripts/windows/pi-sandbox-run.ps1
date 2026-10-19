@@ -47,6 +47,7 @@ $Yes = $false
 $StateVolumeSet = $false
 $ExtraMounts = [System.Collections.Generic.List[string]]::new()
 $ForwardedPorts = [System.Collections.Generic.List[string]]::new()
+$HostEnvNames = [System.Collections.Generic.List[string]]::new()
 $PiExtensions = [System.Collections.Generic.List[string]]::new()
 $ProjectRcFile = ''
 $ProfileName = ''
@@ -324,6 +325,82 @@ function Parse-Mount([string]$Spec) {
     return "$source`:$($Matches.target):$mode"
 }
 
+function Get-RepositoryEnvironment {
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return }
+    if ((& git -C $HostWorkspace rev-parse --is-inside-work-tree 2>$null) -ne 'true') { return }
+    foreach ($identity in @(
+        @('user.name', 'GIT_AUTHOR_NAME', 'GIT_COMMITTER_NAME'),
+        @('user.email', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_EMAIL')
+    )) {
+        $value = @(& git -C $HostWorkspace config --get $identity[0] 2>$null) -join "`n"
+        if ($value -and $value -notmatch "[\r\n]") {
+            '--env'; "$($identity[1])=$value"
+            '--env'; "$($identity[2])=$value"
+        }
+    }
+    $remote = 'origin'
+    $url = @(& git -C $HostWorkspace config --get "remote.$remote.url" 2>$null) -join "`n"
+    if (-not $url) {
+        $remotes = @(& git -C $HostWorkspace remote 2>$null)
+        if (-not $remotes.Count) { return }
+        $remote = $remotes[0]
+        $url = @(& git -C $HostWorkspace config --get "remote.$remote.url" 2>$null) -join "`n"
+    }
+    if ($url -match "[\r\n]") { return }
+    $login = ''
+    if ($url -cmatch '^(https?|ssh|git)://([^/]+)/(.+)$') {
+        $scheme = $Matches[1]; $authority = $Matches[2]; $repoPath = $Matches[3]
+        if ($authority.Contains('@')) { $login = ($authority.Substring(0, $authority.LastIndexOf('@')) -split ':', 2)[0] }
+        $repoHost = ($authority -split '@')[-1]
+        if ($scheme -in @('ssh', 'git')) { $repoHost = ($repoHost -split ':', 2)[0] }
+    }
+    elseif ($url -cmatch '^([^/@:]+@)?([A-Za-z0-9][A-Za-z0-9.-]*):(.+)$') {
+        $login = $Matches[1] -replace '@$', ''; $repoHost = $Matches[2]; $repoPath = $Matches[3]; $scheme = 'ssh'
+    }
+    else { return }
+    $repoPath = (($repoPath -split '[?#]', 2)[0] -replace '/$', '') -replace '\.git$', ''
+    if ($repoHost -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?$' -or
+        $repoPath -cnotmatch '^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$') { return }
+    '--env'; "GH_HOST=$repoHost"
+    '--env'; "GH_REPO=$repoHost/$repoPath"
+    '--env'; "GITLAB_HOST=$repoHost"
+    '--env'; "GITLAB_API_HOST=$repoHost"
+    '--env'; "GITLAB_REPO=$repoPath"
+    '--env'; "GLAB_API_PROTOCOL=$(if ($scheme -eq 'http') { 'http' } else { 'https' })"
+    # Transport login is metadata only, not the authenticated service account.
+    if ($login -cmatch '^[A-Za-z0-9_.-]+$') { '--env'; "GIT_REMOTE_USER=$login" }
+}
+
+function Get-ProfileSecrets {
+    if (-not $ProfileName) { return }
+    $file = Join-Path (Split-Path -Parent $ConfigFile) "profiles/$ProfileName.profile"
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return }
+    foreach ($raw in Get-Content -LiteralPath $file) {
+        $line = $raw.Trim()
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        $parts = $line -split '=', 2
+        $key = $parts[0].Trim()
+        if ($key -cin @('ENV', 'ENV_SECRET')) {
+            if ($parts.Count -ne 2) { Fail "${file}: $key requires NAME=value" }
+            $entry = $parts[1].Trim()
+            $pair = $entry -split '=', 2
+            if ($pair.Count -ne 2 -or $pair[0].Trim() -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+                Fail "${file}: $key requires NAME=value with a valid environment variable name"
+            }
+            $target = $pair[0].Trim(); $value = $pair[1]
+            if ($key -ceq 'ENV_SECRET') {
+                if ($value -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$') { Fail "${file}: ENV_SECRET requires a Podman secret name" }
+                '--secret'
+                "$value,type=env,target=$target"
+            }
+            else {
+                '--env'
+                "$target=$value"
+            }
+        }
+    }
+}
+
 function List-SandboxImages {
     & podman image ls --format '{{.Repository}}`t{{.Tag}}`t{{.ID}}`t{{.CreatedSince}}`t{{.Size}}' |
         ForEach-Object { $parts = $_ -split "`t"; if ($parts.Count -eq 5 -and $parts[1] -eq 'pi-sandbox') { '- {0,-35} {1,-17} {2,-13} {3,-12} {4}' -f $parts } }
@@ -425,6 +502,11 @@ while ($index -lt $args.Count) {
                 Fail '--port requires SPEC'
             }; $ForwardedPorts.Add($args[$index])
         }
+        '--env' {
+            $index++; if ($index -ge $args.Count) { Fail '--env requires NAME' }
+            if ($args[$index] -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Fail '--env requires an environment variable name, not NAME=value' }
+            $HostEnvNames.Add($args[$index])
+        }
         '--env-file' {
             $index++; if ($index -ge $args.Count) {
                 Fail '--env-file requires FILE'
@@ -521,6 +603,7 @@ Load-ProjectConfig
 if ($ProfileName -and $ProfileName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
     Fail "invalid profile name '$ProfileName'"
 }
+$profileSecretArgs = @(Get-ProfileSecrets)
 if ($InstanceName -and $InstanceName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
     Fail "invalid sandbox name '$InstanceName'"
 }
@@ -599,6 +682,8 @@ if (-not $DryRun -and -not (Podman-Exists ([string[]]@('volume', 'exists', $Agen
 
 $runArgs = [System.Collections.Generic.List[string]]::new()
 $runArgs.AddRange([string[]]@('run', '--rm', '--interactive', '--tty', "--userns=keep-id:uid=$ContainerUid,gid=$ContainerGid", '--cap-drop=ALL', '--security-opt=no-new-privileges', "--pids-limit=$PidsLimit", '--env', "HOME=$ContainerHome", '--env', "USER=$ContainerUser", '--env', "XDG_CONFIG_HOME=$ContainerHome/.config", '--env', "XDG_DATA_HOME=$ContainerHome/.local/share", '--env', "XDG_CACHE_HOME=$ContainerHome/.cache", '--env', "XDG_STATE_HOME=$ContainerHome/.local/state", '--env', "XDG_BIN_HOME=$ContainerHome/.local/bin", '--volume', "$HostWorkspace`:$ContainerStartDir`:rw", '--volume', "$AgentVolume`:$ContainerHome/.pi/agent:rw", '--workdir', $ContainerStartDir))
+$runArgs.AddRange([string[]]@(Get-RepositoryEnvironment))
+$runArgs.AddRange([string[]]$profileSecretArgs)
 if ($Memory) {
     $runArgs.Add('--memory'); $runArgs.Add($Memory)
 }
@@ -618,6 +703,9 @@ if ($EnvFile) {
     if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
         Fail "environment file is not readable: $EnvFile"
     }; $runArgs.Add('--env-file'); $runArgs.Add($EnvFile)
+}
+foreach ($name in $HostEnvNames) {
+    $runArgs.Add('--env'); $runArgs.Add($name)
 }
 foreach ($name in @('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY')) {
     if ([Environment]::GetEnvironmentVariable($name)) {

@@ -65,6 +65,7 @@ FORWARDED_PORTS=()
 PI_EXTENSIONS=()
 CLI_EXTRA_MOUNTS=()
 CLI_FORWARDED_PORTS=()
+HOST_ENV_NAMES=()
 CLI_INSTANCE_NAME=""
 ALLOWED_ROOTS=()
 PI_ARGS=()
@@ -272,6 +273,73 @@ load_config() {
     done < "$CONFIG_FILE"
 }
 
+load_repository_environment() {
+    REPOSITORY_ENV_ARGS=()
+    command -v git >/dev/null 2>&1 || return 0
+    [[ "$(git -C "$HOST_WORKSPACE" rev-parse --is-inside-work-tree 2>/dev/null || true)" == true ]] || return 0
+    local value name remote url scheme authority path host login="" entry
+    for entry in 'user.name:GIT_AUTHOR_NAME:GIT_COMMITTER_NAME' 'user.email:GIT_AUTHOR_EMAIL:GIT_COMMITTER_EMAIL'; do
+        value="$(git -C "$HOST_WORKSPACE" config --get "${entry%%:*}" 2>/dev/null || true)"
+        if [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]]; then
+            name="${entry#*:}"
+            REPOSITORY_ENV_ARGS+=(--env "${name%%:*}=$value" --env "${name#*:}=$value")
+        fi
+    done
+    remote=origin
+    url="$(git -C "$HOST_WORKSPACE" config --get "remote.${remote}.url" 2>/dev/null || true)"
+    if [[ -z "$url" ]]; then
+        remote="$(git -C "$HOST_WORKSPACE" remote 2>/dev/null | head -n 1 || true)"
+        [[ -n "$remote" ]] || return 0
+        url="$(git -C "$HOST_WORKSPACE" config --get "remote.${remote}.url" 2>/dev/null || true)"
+    fi
+    [[ "$url" != *$'\n'* && "$url" != *$'\r'* ]] || return 0
+    if [[ "$url" =~ ^(https?|ssh|git)://([^/]+)/(.+)$ ]]; then
+        scheme="${BASH_REMATCH[1]}"; authority="${BASH_REMATCH[2]}"; path="${BASH_REMATCH[3]}"
+        if [[ "$authority" == *@* ]]; then login="${authority%@*}"; login="${login%%:*}"; fi
+        host="${authority##*@}"
+        # An SSH/Git transport port is not the HTTP API port.
+        [[ "$scheme" == ssh || "$scheme" == git ]] && host="${host%%:*}"
+    elif [[ "$url" =~ ^([^/@:]+@)?([A-Za-z0-9][A-Za-z0-9.-]*):(.+)$ ]]; then
+        login="${BASH_REMATCH[1]%@}"; host="${BASH_REMATCH[2]}"; path="${BASH_REMATCH[3]}"; scheme=ssh
+    else
+        return 0
+    fi
+    path="${path%%\?*}"; path="${path%%\#*}"; path="${path%/}"; path="${path%.git}"
+    [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?$ && "$path" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$ ]] || return 0
+    REPOSITORY_ENV_ARGS+=(--env "GH_HOST=$host" --env "GH_REPO=$host/$path"
+        --env "GITLAB_HOST=$host" --env "GITLAB_API_HOST=$host" --env "GITLAB_REPO=$path")
+    if [[ "$scheme" == http ]]; then value=http; else value=https; fi
+    REPOSITORY_ENV_ARGS+=(--env "GLAB_API_PROTOCOL=$value")
+    # Transport login is metadata only, not the authenticated service account.
+    if [[ "$login" =~ ^[A-Za-z0-9_.-]+$ ]]; then REPOSITORY_ENV_ARGS+=(--env "GIT_REMOTE_USER=$login"); fi
+}
+
+load_profile_secrets() {
+    PROFILE_SECRET_ARGS=()
+    [[ -n "$PROFILE" ]] || return 0
+    local file="$(dirname "$CONFIG_FILE")/profiles/${PROFILE}.profile" line key value token
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="$(trim "$line")"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        key="$(trim "${line%%=*}")"
+        case "$key" in
+            ENV|ENV_SECRET)
+                value="$(trim "${line#*=}")"
+                [[ "$line" == *=* && "$value" == *=* ]] || { err "$file: $key requires NAME=value"; return 1; }
+                token="$(trim "${value%%=*}")"; value="${value#*=}"
+                [[ "$token" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { err "$file: Invalid environment variable name"; return 1; }
+                if [[ "$key" == ENV_SECRET ]]; then
+                    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { err "$file: ENV_SECRET requires a Podman secret name"; return 1; }
+                    PROFILE_SECRET_ARGS+=(--secret "${value},type=env,target=${token}")
+                else
+                    PROFILE_SECRET_ARGS+=(--env "${token}=${value}")
+                fi
+                ;;
+        esac
+    done < "$file"
+}
+
 list_images() {
     podman image ls --format '{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}' |
         awk -F '\t' '$2 == "pi-sandbox" { printf "- %-35s %-17s %-13s %-12s %s\n", $1, $2, $3, $4, $5 }'
@@ -466,6 +534,7 @@ while [[ $# -gt 0 ]]; do
         --workspace) [[ $# -ge 2 ]] || { err "$1 requires DIRECTORY"; exit 2; }; HOST_WORKSPACE="$2"; shift ;;
         --mount) [[ $# -ge 2 ]] || { err "$1 requires SPEC"; exit 2; }; CLI_EXTRA_MOUNTS+=("$2"); shift ;;
         --port) [[ $# -ge 2 ]] || { err "$1 requires SPEC"; exit 2; }; CLI_FORWARDED_PORTS+=("$2"); shift ;;
+        --env) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; [[ "$2" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { err "--env requires an environment variable name, not NAME=value"; exit 2; }; HOST_ENV_NAMES+=("$2"); shift ;;
         --env-file) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; ENV_FILE="$2"; shift ;;
         --state-volume) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; AGENT_VOLUME="$2"; STATE_VOLUME_SET=1; shift ;;
         --memory) [[ $# -ge 2 ]] || { err "$1 requires SIZE"; exit 2; }; MEMORY="$2"; shift ;;
@@ -512,6 +581,7 @@ EXTRA_MOUNTS+=("${CLI_EXTRA_MOUNTS[@]}")
 FORWARDED_PORTS+=("${CLI_FORWARDED_PORTS[@]}")
 
 [[ -z "$PROFILE" || "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid profile name '$PROFILE'"; exit 2; }
+load_profile_secrets || exit 2
 [[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { err "Invalid sandbox name '$INSTANCE_NAME'"; exit 2; }
 [[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "Container UID must be numeric"; exit 2; }
 [[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "Container GID must be numeric"; exit 2; }
@@ -625,6 +695,9 @@ RUN_ARGS=(
     --workdir "$CONTAINER_START_DIR"
 )
 
+load_repository_environment
+RUN_ARGS+=("${REPOSITORY_ENV_ARGS[@]}")
+RUN_ARGS+=("${PROFILE_SECRET_ARGS[@]}")
 [[ -n "$MEMORY" ]] && RUN_ARGS+=(--memory "$MEMORY")
 [[ -n "$CPUS" ]] && RUN_ARGS+=(--cpus "$CPUS")
 [[ "$NETWORK_MODE" == "none" ]] && RUN_ARGS+=(--network=none --env PI_OFFLINE=1)
@@ -640,6 +713,10 @@ if [[ -n "$ENV_FILE" ]]; then
     [[ -r "$ENV_FILE" ]] || { err "Environment file is not readable: $ENV_FILE"; exit 1; }
     RUN_ARGS+=(--env-file "$ENV_FILE")
 fi
+
+for var in "${HOST_ENV_NAMES[@]}"; do
+    RUN_ARGS+=(--env "$var")
+done
 
 for var in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; do
     [[ -n "${!var:-}" ]] && RUN_ARGS+=(--env "$var")

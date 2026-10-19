@@ -2,6 +2,12 @@
 
 Create and build Pi sandbox images. This command is intended for administrators or users responsible for image/profile management.
 
+All images include GitHub CLI (`gh`) and GitLab CLI (`glab`), installed from
+Debian packages (Bookworm uses its signed backports repository for `glab`).
+For existing images, use `PROFILE --regenerate-containerfile --update` to pick
+up the updated standard toolset. Authenticate using host `--env` options or
+profile `ENV_SECRET` references; credentials are not included in the image.
+
 ## Usage
 
 ```text
@@ -26,7 +32,7 @@ pi-sandbox-create --list-images
 - `--tool TOOL@VERSION` — add a tool; repeatable. Supported tools: `go`, `rust`, `jvm`, `uv`, `fnm`, `python`, `caddy`, `playwright`. Caddy downloads its requested release into the Pi user's XDG bin directory. Playwright installs its CLI, Chromium/Firefox/WebKit browsers with dependencies, and `@playwright/mcp`. Node for Pi comes exclusively from `--base-image`.
 - `--extension TYPE:SPEC` — add an extension; repeatable. Supported extensions: `rustup:COMPONENT`, `cargo:CRATE[@VERSION]`, `uv:PACKAGE[@VERSION]`, `fnm:node@VERSION`. The FNM Node extension requires `--tool fnm@VERSION` and installs only under the Pi user's FNM tree.
 - `--npm PACKAGE[@VERSION]` — install a global npm command-line package; repeatable. Scoped packages such as `@angular/cli@20.3.9` and version ranges such as `playwright@^1.55.0` are supported.
-- `--env NAME=VALUE` — add an environment variable to the manifest.
+- `--env NAME=VALUE` — add an environment variable to the manifest as `ENV=NAME=VALUE`; the value is baked into the image and passed by the runner. For runtime-only secrets, add `ENV_SECRET=NAME=PODMAN_SECRET_NAME` to the profile instead; never use actual token values.
 - `--path DIRECTORY` — prepend a directory to `PATH` from the manifest.
 - `--apt PACKAGE` — add an APT package to the image; repeatable.
 - `--shell-command COMMAND` — add a trusted, one-line shell command to run during the image build as the Pi user; repeatable. Commands are persisted in the profile and emitted as Containerfile `RUN` instructions. Use `--apt` for root-level Debian package installation.

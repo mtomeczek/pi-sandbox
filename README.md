@@ -2,6 +2,10 @@
 
 Create and run isolated Pi coding-agent sandboxes with rootless Podman.
 
+Every image includes GitHub CLI (`gh`) and GitLab CLI (`glab`). To add them to
+an existing image, regenerate its Containerfile and rebuild, for example:
+`pi-sandbox-create golang --regenerate-containerfile --update`.
+
 The project is split into two roles:
 
 - **Admin/image creator**: builds versioned sandbox images and profile manifests.

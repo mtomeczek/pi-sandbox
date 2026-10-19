@@ -53,8 +53,14 @@
 #     NPM=create-vite@7.1.7
 #
 # ENV=NAME=VALUE
-#   Environment variable baked into the image. Repeatable.
-#   Example: ENV=RUST_BACKTRACE=1
+#   Plain environment variable, baked into the image and passed by the runner.
+#   Repeatable. Split at the first '=' after NAME; remaining '=' are preserved.
+#   Example: ENV=APP_MODE=development
+#
+# ENV_SECRET=NAME=PODMAN_SECRET_NAME
+#   Runtime-only environment variable sourced from an existing Podman secret.
+#   Repeatable. Never put the actual secret value here or in ENV.
+#   Example: ENV_SECRET=API_TOKEN=my-api-token
 #
 # PATH=DIRECTORY
 #   Directory prepended to PATH in the image. Repeatable.

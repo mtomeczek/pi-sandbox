@@ -5,10 +5,17 @@ ARG USER_NAME=pi
 ARG USER_UID=1000
 ARG USER_GID=1000
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates git curl jq ripgrep fd-find fzf less procps openssh-client unzip xz-utils tar \
+# Bookworm ships glab in backports; newer Debian releases include it directly.
+RUN set -eux; \
+    . /etc/os-release; \
+    if [ "${VERSION_CODENAME:-}" = bookworm ]; then \
+      printf '%s\n' 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/pi-sandbox-backports.list; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
+      bash ca-certificates git gh glab curl jq ripgrep fd-find fzf less procps openssh-client unzip xz-utils tar \
 {{APT_PACKAGES}}
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && gh --version && glab --version \
     && rm -rf /var/lib/apt/lists/*
 # PI_VERSION may be an exact version or an npm dist-tag such as "latest".
 # Install Pi directly in the final runtime stage so npm preserves its package layout.

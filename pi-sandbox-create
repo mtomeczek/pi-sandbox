@@ -235,6 +235,7 @@ load_manifest() {
             PATH) MANIFEST_PATHS+=("$value") ;;
             APT) MANIFEST_APT+=("$value") ;;
             SHELL_COMMAND) MANIFEST_SHELL_COMMANDS+=("$value") ;;
+            ENV_SECRET) : ;;
             *) err "$PROFILE_FILE: Unsupported key '$key'"; exit 2 ;;
         esac
     done < "$PROFILE_FILE"

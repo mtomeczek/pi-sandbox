@@ -28,6 +28,7 @@ pi-sandbox-run rust -- --help
 - `--workspace DIRECTORY` — host directory mounted as the starting directory. Defaults to the current directory. It must satisfy the host-directory restrictions below. Inside the container it is mounted under `$CONTAINER_HOME` with the same basename.
 - `--mount SPEC` — add a bind mount; repeatable. Format: `HOST:CONTAINER[:ro|rw]`. Both paths are validated as described below.
 - `--port SPEC` — publish a container port; repeatable. Format: `HOST_PORT:CONTAINER_PORT[/tcp|udp]`.
+- `--env NAME` — inherit an exported host environment variable through Podman; repeatable (for example, `--env GITHUB_TOKEN --env HTTP_PROXY`). Only names appear in command logs. Unset host variables are not passed; empty values are preserved. Values are available to container processes and extensions.
 - `--env-file FILE` — pass an environment file to Podman.
 - `--state-volume NAME` — override the persistent Pi state volume.
 - `--memory SIZE` — container memory limit, for example `4g`.
@@ -52,6 +53,79 @@ Install or remove the user-local command symlinks with `pi-sandbox-setup`. See `
 - `--verbose`, `--debug` — print detailed commands and diagnostics.
 - `-y`, `--yes` — assume yes for confirmations.
 - `-h`, `--help` — show this help.
+
+## Workspace Git connection
+
+At startup, the runner reads the workspace's Git configuration locally (no
+network calls). It selects `origin`, or the first remote if `origin` is absent,
+and supplies defaults for both CLIs:
+
+- `GH_HOST` and `GH_REPO=HOST/OWNER/REPO` for GitHub CLI.
+- `GITLAB_HOST`, `GITLAB_API_HOST`, `GITLAB_REPO=GROUP/PROJECT`, and
+  `GLAB_API_PROTOCOL` for GitLab CLI. Nested groups and HTTP(S) ports are kept;
+  an SSH transport port is not used as the API port.
+- `GIT_AUTHOR_NAME` / `GIT_COMMITTER_NAME` from Git `user.name`, and
+  `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_EMAIL` from Git `user.email`.
+- `GIT_REMOTE_USER`, when the remote contains a username, as informational
+  transport metadata only. For SSH this is often `git`, not your service login.
+
+HTTP(S), SSH URLs, and `git@host:group/project.git` remotes are supported.
+Embedded passwords, query strings, and fragments are discarded. Missing Git,
+non-repositories, local remotes, and unsupported URL formats are tolerated;
+only available metadata is supplied. SSH aliases are not resolved, and host
+SSH keys/configuration are not copied into the container.
+
+The matching CLI uses these defaults; this does not turn a GitLab host into a
+GitHub host or vice versa. The authenticated username comes from your token,
+not Git's author name or SSH login. Continue supplying tokens explicitly with
+`--env GITHUB_TOKEN`, `--env GITLAB_TOKEN`, or profile `ENV_SECRET` entries
+(use `GH_ENTERPRISE_TOKEN` for a GitHub Enterprise instance). Tokens are never
+inferred from URLs. Override defaults with profile `ENV` entries or runtime
+`--env NAME` options. Container processes and extensions can access the supplied
+identity metadata.
+
+## Profile environment variables
+
+Profile manifests support repeatable directives with `=` separators:
+
+```ini
+ENV=APP_MODE=development
+ENV=API_URL=https://example.test/?a=b
+ENV_SECRET=API_TOKEN=my-api-token
+```
+
+`ENV` passes a literal value using `--env NAME=value` (and is also baked into
+images by the creator). `ENV_SECRET` references an existing Podman secret using
+`--secret my-api-token,type=env,target=API_TOKEN`; it is runtime-only. Never put
+actual tokens in `ENV` or profile files. Names must be valid environment
+variable identifiers. Additional `=` characters in plain values are preserved;
+`-` is not a separator. Empty plain values are allowed. Secret names must be
+non-empty and contain only letters, digits, `.`, `_`, or `-`, starting with a
+letter or digit.
+
+## Profile token secrets
+
+In the selected `profiles/PROFILE.profile` beside the runner config, declare
+existing Podman secret names (not token values):
+
+```ini
+ENV_SECRET=GITLAB_TOKEN=gitlab-token
+ENV_SECRET=GITHUB_TOKEN=github-token
+```
+
+Create the secrets once using Podman, for example from exported host variables:
+
+```bash
+printf '%s' "$GITLAB_TOKEN" | podman secret create gitlab-token -
+printf '%s' "$GITHUB_TOKEN" | podman secret create github-token -
+```
+
+The runner adds `--secret NAME,type=env,target=GITLAB_TOKEN` (or
+`GITHUB_TOKEN`) only for declared entries. Secrets must exist in the same
+Podman connection used by the runner; Podman fails startup if one is missing.
+Values are never written to images or profile files. Container processes,
+including Pi extensions, can access the resulting environment variables.
+`--dry-run` prints references only and does not read or create secrets.
 
 ## Project startup configuration
 

@@ -2,6 +2,12 @@
 
 Create and build Pi sandbox images with Windows Podman and PowerShell 7.
 
+All images include GitHub CLI (`gh`) and GitLab CLI (`glab`), installed from
+Debian packages (Bookworm uses its signed backports repository for `glab`).
+For existing images, use `PROFILE --regenerate-containerfile --update` to pick
+up the updated standard toolset. Authenticate using host `--env` options or
+profile `ENV_SECRET` references; credentials are not included in the image.
+
 ## Usage
 
 ```powershell

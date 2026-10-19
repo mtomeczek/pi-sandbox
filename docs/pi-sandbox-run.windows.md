@@ -59,12 +59,53 @@ require Podman. See
 [`pi-sandbox-run.md`](pi-sandbox-run.md#project-startup-configuration) and
 `templates/pisandboxrc.template` for the validated format and security notes.
 
+## Profile token secrets
+
+Add `ENV_SECRET=GITLAB_TOKEN=gitlab-token` and/or
+`ENV_SECRET=GITHUB_TOKEN=github-token` to `profiles/PROFILE.profile` beside the
+runner config. Values are existing Podman secret names, never token contents.
+The runner injects the secrets as `GITLAB_TOKEN` / `GITHUB_TOKEN` environment
+variables using Podman's `--secret` option. Create secrets in the same Podman
+connection before starting; missing secrets cause Podman to reject startup.
+Container processes and extensions can access the tokens. Dry runs print only
+secret references. See the Unix runner documentation for more detail.
+
+## Workspace Git connection
+
+The runner derives `GH_HOST`, `GH_REPO`, `GITLAB_HOST`, `GITLAB_API_HOST`,
+`GITLAB_REPO`, and `GLAB_API_PROTOCOL` from the workspace's `origin` remote
+(or its first remote). It also supplies Git author/committer names and emails
+from `user.name` / `user.email`. An explicit remote login is exposed only as
+informational `GIT_REMOTE_USER`; it is not the authenticated service username.
+Passwords and URL queries are not forwarded. No network requests are made.
+Missing Git/non-repositories/local remotes are tolerated. SSH aliases and host
+SSH keys/configuration are not imported.
+
+Provide authentication separately with `--env` or profile `ENV_SECRET`; the
+account username comes from the token. Profile `ENV` and explicit `--env`
+options override inferred defaults. See the Unix runner's workspace Git
+connection section for supported remote formats and details.
+
+## Profile environment variables
+
+Repeat `ENV=NAME=value` for literal environment variables and
+`ENV_SECRET=NAME=podman-secret-name` for runtime Podman secret references.
+The separator is `=`, not `-`; additional `=` characters in plain values are
+preserved. `ENV` is also baked into images; `ENV_SECRET` is runtime-only and
+must name an existing secret, never contain a token value. For example:
+
+```ini
+ENV=APP_MODE=development
+ENV_SECRET=API_TOKEN=my-api-token
+```
+
 ## Runtime options
 
 - `--name NAME` — sandbox instance name; changes the persistent state volume.
 - `--workspace DIRECTORY` — Windows absolute path or `.`-relative directory to mount as the container start directory.
 - `--mount SPEC` — repeatable bind mount: `C:\host\path:/container[:ro|rw]`.
 - `--port SPEC` — repeatable port forward: `HOST_PORT:CONTAINER_PORT[/tcp|udp]`.
+- `--env NAME` — inherit an exported host environment variable through Podman; repeatable (for example, `--env GITHUB_TOKEN --env HTTP_PROXY`). Only names appear in command logs. Unset host variables are not passed; empty values are preserved. Values are available to container processes and extensions.
 - `--env-file FILE` — pass an environment file to Podman.
 - `--state-volume NAME` — override the persistent Pi state volume.
 - `--memory SIZE`, `--cpus NUMBER`, `--pids-limit NUMBER` — Podman limits.
