@@ -58,3 +58,4 @@ finally {
     $env:PATH = $oldPath; $env:PODMAN_LOG = $oldLog
     Remove-Item -LiteralPath $work -Recurse -Force
 }
+

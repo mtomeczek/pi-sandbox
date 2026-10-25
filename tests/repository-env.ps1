@@ -41,3 +41,4 @@ finally {
     $env:PATH = $oldPath; $env:GH_REPO = $oldRepo
     Remove-Item -LiteralPath $work -Recurse -Force
 }
+

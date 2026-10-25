@@ -548,3 +548,4 @@ if ($Update -or $Build) {
 else {
     Log 'No build requested. Use --build or --update.'
 }
+
