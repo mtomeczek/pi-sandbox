@@ -2,14 +2,12 @@
 
 Create and run isolated Pi coding-agent sandboxes with rootless Podman.
 
-Every image includes GitHub CLI (`gh`) and GitLab CLI (`glab`). To add them to
-an existing image, regenerate its Containerfile and rebuild, for example:
-`pi-sandbox-create golang --regenerate-containerfile --update`.
+Every image includes GitHub CLI (`gh`) and GitLab CLI (`glab` v1.124.0) with device login support. To update these tools in an existing image, regenerate its Containerfile and rebuild it: `pi-sandbox-create golang --regenerate-containerfile --update`.
 
 The project is split into two roles:
 
-- **Admin/image creator**: builds versioned sandbox images and profile manifests.
-- **Standard user/runner**: runs existing images only. It never builds missing images.
+- **Image administrator**: builds versioned sandbox images and profile manifests.
+- **Standard user**: runs existing images only. It never builds missing images.
 
 ## Requirements
 
@@ -17,12 +15,15 @@ The project is split into two roles:
 - Rootless Podman
 - Working subordinate UID/GID mappings for rootless `keep-id` containers
 - Network access during image builds
+- Python 3.9+ on the host for pre-build validation, profile version management, and runner `--doctor` diagnostics; normal container startup does not require Python
+
+See [sandbox management](docs/sandbox-management.md) for profile validation, version audits and upgrades with backups, workspace profile selection, optional CLI authentication persistence, and read-only diagnostics.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `pi-sandbox-create` | Admin command for creating profile manifests, generating Containerfiles, and building/removing images. |
+| `pi-sandbox-create` | Administrative command for creating profile manifests, generating Containerfiles, and building or removing images. |
 | `pi-sandbox-run` | Standard-user command for running existing sandbox images. It never builds missing images. |
 | `pi-sandbox-setup` | Unix-only command for installing or removing the user-local command symlinks. |
 
@@ -42,8 +43,7 @@ ${XDG_BIN_HOME:-$HOME/.local/bin}/pi-sandbox-run
 ${XDG_BIN_HOME:-$HOME/.local/bin}/pi-sandbox-setup
 ```
 
-Make sure that directory is in `PATH`. The setup command refuses to replace regular
-files or unrelated symlinks, and preflights every destination before changing any of them.
+Ensure that directory is in `PATH`. The setup command refuses to replace regular files or unrelated symlinks, and validates every destination before making changes.
 
 Remove the installed symlinks with:
 
@@ -53,7 +53,7 @@ pi-sandbox-setup --remove
 
 ## Quick start
 
-### Admin: create and build a profile image
+### Administrator: create and build a profile image
 
 ```bash
 ./pi-sandbox-create --create rust --tool rust@1.90.0
@@ -67,7 +67,7 @@ pi-sandbox-rust:latest
 
 ### macOS
 
-The standard Bash commands are the macOS version; no separate launcher is required. They support the stock Bash 3.2 and BSD userland, including symlinked installation through `pi-sandbox-setup`. Start a Podman machine before creating or running sandboxes:
+The Bash commands also support macOS; no separate launcher is required. They support the system-provided Bash 3.2 and BSD utilities, including symlinked installation through `pi-sandbox-setup`. Start a Podman machine before creating or running sandboxes:
 
 ```bash
 podman machine init  # first use only
@@ -78,9 +78,9 @@ podman machine start
 
 See [macOS documentation](docs/pi-sandbox-macos.md) for configuration and validation details.
 
-### Windows PowerShell 7
+### PowerShell 7 on Windows
 
-Create with Windows Podman:
+Create an image with Windows Podman:
 
 ```powershell
 .\pi-sandbox-create.ps1 --create node-legacy --tool fnm@1.39.0 --extension fnm:node@14
@@ -109,9 +109,9 @@ Use `--` to stop sandbox option parsing:
 ./pi-sandbox-run rust -- --help
 ```
 
-## Admin usage
+## Administrator usage
 
-Create/update a profile manifest and image:
+Create or update a profile manifest and image:
 
 ```bash
 ./pi-sandbox-create --create rust \
@@ -143,7 +143,7 @@ Build an existing profile if the image is missing:
 ./pi-sandbox-create rust --build
 ```
 
-Force rebuild:
+Force an image rebuild:
 
 ```bash
 ./pi-sandbox-create rust --update --pull
@@ -155,7 +155,7 @@ Regenerate the Containerfile:
 ./pi-sandbox-create rust --regenerate-containerfile
 ```
 
-Show resolved build configuration:
+Show the resolved build configuration:
 
 ```bash
 ./pi-sandbox-create rust --info
@@ -163,7 +163,7 @@ Show resolved build configuration:
 
 ## Project Node runtime
 
-The image's base Node remains the runtime for Pi itself. To give project commands a separate Node version, add FNM and pin the project runtime while creating a profile:
+Pi uses the Node.js runtime supplied by the base image. To use a separate Node.js version for project commands, add FNM and specify the project runtime version when creating a profile:
 
 ```bash
 ./pi-sandbox-create --create legacy \
@@ -202,23 +202,11 @@ Use a different host starting directory:
 ./pi-sandbox-run rust --workspace ~/src/projects/backend
 ```
 
-The directory keeps its basename inside the container. In this example it is
-mounted at `/home/pi/backend`, and Pi starts there. The current directory uses
-the same rule when `--workspace` is omitted; no generic `/home/pi/workspace`
-runtime mount is used.
+The directory keeps its basename inside the container. In this example it is mounted at `/home/pi/backend`, and Pi starts there. The current directory uses the same rule when `--workspace` is omitted; no generic `/home/pi/workspace` runtime mount is used.
 
-Starting-directory and extra-mount sources are validated identically. They must
-be existing, non-symlinked directories strictly below a configured allowed
-root. They may be nested at any depth and do not need to be direct children.
-Sources may be absolute or start with `./`; `./` paths are expanded against the
-current directory before validation. Other relative paths are rejected. Files,
-the approved roots themselves, hidden directory components, `.`/`..` traversal,
-and paths outside configured roots are rejected.
+Starting-directory and extra-mount sources are validated identically. They must be existing, non-symlinked directories strictly below a configured allowed root. They may be nested at any depth and do not need to be direct children. Sources may be absolute or start with `./`; `./` paths are expanded against the current directory before validation. Other relative paths are rejected. Files, the approved roots themselves, hidden directory components, `.`/`..` traversal, and paths outside configured roots are rejected.
 
-Only the selected source directory and its path are validated. Its contents are
-not scanned and may include hidden files/directories, regular files, and
-symbolic links. Extra mount destinations must be absolute and cannot be `/`,
-hidden, or contain traversal components. Mount mode is limited to `ro` or `rw`.
+Only the selected source directory and its path are validated. Its contents are not scanned and may include hidden files/directories, regular files, and symbolic links. Extra mount destinations must be absolute and cannot be `/`, hidden, or contain traversal components. Mount mode is limited to `ro` or `rw`.
 
 Allowed roots are configured one absolute path per line in:
 
@@ -226,10 +214,7 @@ Allowed roots are configured one absolute path per line in:
 ${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/allowed-roots
 ```
 
-The file is created automatically with `$HOME/src` as its default entry and can
-be edited by hand. `$HOME/src` is created if it does not already exist. Entries
-must be existing directories; filesystem roots, hidden components, `.`/`..`,
-empty components, and symlinks are rejected. For example:
+The file is created automatically with `$HOME/src` as its default entry and can be edited manually. `$HOME/src` is created if it does not already exist. Entries must be existing directories; filesystem roots, hidden components, `.`/`..`, empty components, and symlinks are rejected. For example:
 
 ```text
 /home/you/src
@@ -239,9 +224,7 @@ empty components, and symlinks are rejected. For example:
 
 ### Project-local startup settings
 
-A workspace can commit `.pisandboxrc` to declare a sandbox name, repeatable port
-forwards and extra mounts, plus Pi package sources to install into that
-workspace's `.pi/settings.json`:
+A workspace can include a version-controlled `.pisandboxrc` file to declare an image profile, a sandbox name, port mappings, additional mounts, and Pi package sources to install into the workspace's `.pi/settings.json`:
 
 ```ini
 NAME=backend
@@ -250,13 +233,9 @@ MOUNT=./shared-libs:/src/shared:ro
 PI_EXTENSION=npm:@acme/pi-tools@1.2.3
 ```
 
-The launcher parses this as data, never as shell code. CLI values take
-precedence for the name and append after project ports/mounts. See
-[`docs/pi-sandbox-run.md`](docs/pi-sandbox-run.md#project-startup-configuration)
-and [`templates/pisandboxrc.template`](templates/pisandboxrc.template) for the
-complete contract.
+The launcher parses this as data, never as shell code. Command-line values take precedence for the name and are appended after the project's port and mount settings. See [`docs/pi-sandbox-run.md`](docs/pi-sandbox-run.md#project-startup-configuration) and [`templates/pisandboxrc.template`](templates/pisandboxrc.template) for the complete configuration reference.
 
-Run with no network:
+Run without network access:
 
 ```bash
 ./pi-sandbox-run rust --no-network
@@ -268,13 +247,13 @@ Start a shell instead of Pi:
 ./pi-sandbox-run rust --shell
 ```
 
-Show resolved runtime configuration:
+Show the resolved runtime configuration:
 
 ```bash
 ./pi-sandbox-run rust --info
 ```
 
-### Windows PowerShell 7
+### PowerShell 7 on Windows
 
 Use `pi-sandbox-run.ps1` with Windows Podman:
 
@@ -293,8 +272,7 @@ A positional profile name maps to an image name:
 rust -> pi-sandbox-rust:latest
 ```
 
-The runner does not build missing images. If the selected image does not exist,
-ask an administrator to create it with `pi-sandbox-create`.
+The runner does not build missing images. If the selected image does not exist, ask an administrator to create it with `pi-sandbox-create`.
 
 ## Generated files
 
@@ -310,14 +288,14 @@ Profile manifests are written to:
 ${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/profiles/
 ```
 
-The default config and allowed-roots files are:
+The default configuration and allowed-roots files are:
 
 ```text
 ${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/config
 ${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/allowed-roots
 ```
 
-## Templates and docs
+## Templates and documentation
 
 Containerfile generation uses the base template and external dynamic snippets:
 
@@ -326,7 +304,7 @@ templates/Containerfile.pi-sandbox.template
 templates/Containerfile.snippets.template
 ```
 
-Default creator/runner configuration and allowed-roots content are also external templates:
+Default configuration for the creator and runner and allowed-roots content are also external templates:
 
 ```text
 templates/create.config.template
@@ -340,7 +318,7 @@ New profile manifests include the explanatory preamble from:
 templates/profile.template
 ```
 
-Help text is externalized as Markdown:
+Help text is maintained in separate Markdown files:
 
 ```text
 docs/pi-sandbox-run.md
@@ -367,7 +345,7 @@ cmp -s <(./pi-sandbox-create --help) docs/pi-sandbox-create.md
 cmp -s <(./pi-sandbox-setup --help) docs/pi-sandbox-setup.md
 ```
 
-Run the setup safety regression test:
+Run the setup, directory-validation, portability, and release-policy regression tests:
 
 ```bash
 bash tests/setup.sh
@@ -382,7 +360,7 @@ Run ShellCheck locally when available (the GitHub Actions static-analysis workfl
 shellcheck --shell=bash --severity=warning pi-sandbox-create pi-sandbox-run pi-sandbox-setup tests/*.sh
 ```
 
-Run the matching Windows static analysis with the checked-in settings:
+Run the matching Windows static analysis with the settings provided in the repository:
 
 ```powershell
 Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
@@ -390,7 +368,7 @@ Invoke-ScriptAnalyzer -Path .\pi-sandbox-create.ps1 -Settings .\PSScriptAnalyzer
 Invoke-ScriptAnalyzer -Path .\pi-sandbox-run.ps1 -Settings .\PSScriptAnalyzerSettings.psd1
 ```
 
-Validate the Windows PowerShell launchers and their help contracts:
+Validate the Windows PowerShell launchers and verify their help output:
 
 ```powershell
 pwsh -NoProfile -File .\pi-sandbox-create.ps1 --help | Compare-Object (Get-Content .\docs\pi-sandbox-create.windows.md)
@@ -403,5 +381,4 @@ Michal Tomeczek <mtomeczek74@gmail.com>
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for the
-full license text.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for the full license text.

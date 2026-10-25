@@ -1,6 +1,6 @@
 # macOS support
 
-`pi-sandbox-create`, `pi-sandbox-run`, and `pi-sandbox-setup` are the macOS command scripts. They do not need PowerShell wrappers or a GNU coreutils installation: the scripts support macOS's bundled Bash 3.2 and BSD utilities.
+`pi-sandbox-create`, `pi-sandbox-run`, and `pi-sandbox-setup` are the macOS command scripts. They do not need PowerShell wrappers or a GNU coreutils installation: the scripts support Bash 3.2 bundled with macOS and BSD utilities.
 
 ## Requirements
 
@@ -17,19 +17,19 @@ podman machine start
 
 ## Install commands
 
-Install the commands into the XDG-style user bin directory:
+Install the commands into the XDG user binary directory:
 
 ```bash
 ./pi-sandbox-setup --install
 ```
 
-On macOS the default destination is `~/.local/bin`. Add it to `PATH` if it is not already present:
+On macOS, the default destination is `~/.local/bin`. Add it to `PATH` if it is not already present:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The installer only creates or removes symlinks that point to this checkout. Remove them with:
+The installer only creates or removes symlinks that point to this working tree. Remove them with:
 
 ```bash
 pi-sandbox-setup --remove
@@ -51,11 +51,11 @@ Create and run profiles exactly as on other Unix hosts:
 ./pi-sandbox-run rust
 ```
 
-See [creator usage](pi-sandbox-create.md), [runner usage](pi-sandbox-run.md), and [setup usage](pi-sandbox-setup.md) for the full option references.
+See [creator usage](pi-sandbox-create.md), [runner usage](pi-sandbox-run.md), and [setup usage](pi-sandbox-setup.md) for the complete option references.
 
 ## Validation
 
-Run the macOS portability regression from the repository root:
+Run the macOS portability regression test from the repository root:
 
 ```bash
 bash tests/macos-compat.sh

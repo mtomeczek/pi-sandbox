@@ -31,6 +31,9 @@ pi-sandbox-run rust -- --help
 - `--env NAME` — inherit an exported host environment variable through Podman; repeatable (for example, `--env GITHUB_TOKEN --env HTTP_PROXY`). Only names appear in command logs. Unset host variables are not passed; empty values are preserved. Values are available to container processes and extensions.
 - `--env-file FILE` — pass an environment file to Podman.
 - `--state-volume NAME` — override the persistent Pi state volume.
+- `--persist-cli-auth` — opt into dedicated named volumes for `gh` and `glab` configuration. These volumes may store plaintext credentials.
+- `--reset-cli-auth` — remove these CLI authentication volumes after confirmation; supports `--dry-run` and `--yes`.
+- `--doctor` — validate runtime settings and check Podman, images, secret references, and local ports without starting a container. Requires Python 3.9+.
 - `--memory SIZE` — container memory limit, for example `4g`.
 - `--cpus NUMBER` — CPU limit, for example `4` or `2.5`.
 - `--pids-limit NUMBER` — maximum number of processes.
@@ -47,42 +50,25 @@ Install or remove the user-local command symlinks with `pi-sandbox-setup`. See `
 - `--show-state` — show persistent state-volume information.
 - `--reset-state` — delete persistent Pi state after confirmation.
 - `--info` — show resolved runtime configuration.
-- `--list-images` — list locally available images carrying the `pi-sandbox` tag (repository, tag, ID, age, size) without starting one. The administrator's creator assigns this tag when it builds or reuses an image.
-- `--init` — create the standard `.pisandboxrc` in the resolved workspace. With `--name NAME`, it writes `NAME=NAME` into that file. It refuses to overwrite an existing path and does not require Podman.
-- `--dry-run` — print actions without executing them.
+- `--list-images` — list locally available images carrying the `pi-sandbox` tag (repository, tag, ID, age, size) without starting one. `pi-sandbox-create` assigns this tag when it builds or reuses an image.
+- `--init` — create the standard `.pisandboxrc` in the resolved workspace. For example, `--name backend` writes `NAME=backend` into the file. It refuses to overwrite an existing path and does not require Podman.
+- `--dry-run` — preview actions and resolved settings without running containers; literal environment values are redacted.
 - `--verbose`, `--debug` — print detailed commands and diagnostics.
 - `-y`, `--yes` — assume yes for confirmations.
 - `-h`, `--help` — show this help.
 
-## Workspace Git connection
+## GitHub and GitLab authentication
 
-At startup, the runner reads the workspace's Git configuration locally (no
-network calls). It selects `origin`, or the first remote if `origin` is absent,
-and supplies defaults for both CLIs:
+The image includes `gh` and `glab`, but the runner does not infer CLI settings, Git identity, or credentials from the workspace. Authenticate inside the sandbox when needed:
 
-- `GH_HOST` and `GH_REPO=HOST/OWNER/REPO` for GitHub CLI.
-- `GITLAB_HOST`, `GITLAB_API_HOST`, `GITLAB_REPO=GROUP/PROJECT`, and
-  `GLAB_API_PROTOCOL` for GitLab CLI. Nested groups and HTTP(S) ports are kept;
-  an SSH transport port is not used as the API port.
-- `GIT_AUTHOR_NAME` / `GIT_COMMITTER_NAME` from Git `user.name`, and
-  `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_EMAIL` from Git `user.email`.
-- `GIT_REMOTE_USER`, when the remote contains a username, as informational
-  transport metadata only. For SSH this is often `git`, not your service login.
+```bash
+gh auth login
+glab auth login --hostname gitlab.com --device
+```
 
-HTTP(S), SSH URLs, and `git@host:group/project.git` remotes are supported.
-Embedded passwords, query strings, and fragments are discarded. Missing Git,
-non-repositories, local remotes, and unsupported URL formats are tolerated;
-only available metadata is supplied. SSH aliases are not resolved, and host
-SSH keys/configuration are not copied into the container.
+Device login displays a URL and code to open in your host browser, without requiring a browser callback inside the container. It requires GitLab 17.9 or later; replace `gitlab.com` with your own instance as appropriate.
 
-The matching CLI uses these defaults; this does not turn a GitLab host into a
-GitHub host or vice versa. The authenticated username comes from your token,
-not Git's author name or SSH login. Continue supplying tokens explicitly with
-`--env GITHUB_TOKEN`, `--env GITLAB_TOKEN`, or profile `ENV_SECRET` entries
-(use `GH_ENTERPRISE_TOKEN` for a GitHub Enterprise instance). Tokens are never
-inferred from URLs. Override defaults with profile `ENV` entries or runtime
-`--env NAME` options. Container processes and extensions can access the supplied
-identity metadata.
+CLI login configuration is not persisted by the Pi state volume. Use `--persist-cli-auth` for separate, opt-in credential volumes, and `--reset-cli-auth` to delete them. See [sandbox management](sandbox-management.md) for credential-storage risks, diagnostics, and examples. For noninteractive authentication, explicitly configure `--env NAME`, profile `ENV`, or `ENV_SECRET`; the runner does not add these settings automatically.
 
 ## Profile environment variables
 
@@ -94,19 +80,11 @@ ENV=API_URL=https://example.test/?a=b
 ENV_SECRET=API_TOKEN=my-api-token
 ```
 
-`ENV` passes a literal value using `--env NAME=value` (and is also baked into
-images by the creator). `ENV_SECRET` references an existing Podman secret using
-`--secret my-api-token,type=env,target=API_TOKEN`; it is runtime-only. Never put
-actual tokens in `ENV` or profile files. Names must be valid environment
-variable identifiers. Additional `=` characters in plain values are preserved;
-`-` is not a separator. Empty plain values are allowed. Secret names must be
-non-empty and contain only letters, digits, `.`, `_`, or `-`, starting with a
-letter or digit.
+`ENV` passes a literal value using `--env NAME=value` (and is also included in images by the creator). `ENV_SECRET` references an existing Podman secret using `--secret my-api-token,type=env,target=API_TOKEN`; it is runtime-only. Never put actual tokens in `ENV` or profile files. Names must be valid environment variable identifiers. Additional `=` characters in plain values are preserved; `-` is not a separator. Empty plain values are allowed. Secret names must be non-empty and contain only letters, digits, `.`, `_`, or `-`, starting with a letter or digit.
 
 ## Profile token secrets
 
-In the selected `profiles/PROFILE.profile` beside the runner config, declare
-existing Podman secret names (not token values):
+In the selected `profiles/PROFILE.profile` alongside the runner configuration file, declare existing Podman secret names (not token values):
 
 ```ini
 ENV_SECRET=GITLAB_TOKEN=gitlab-token
@@ -120,18 +98,11 @@ printf '%s' "$GITLAB_TOKEN" | podman secret create gitlab-token -
 printf '%s' "$GITHUB_TOKEN" | podman secret create github-token -
 ```
 
-The runner adds `--secret NAME,type=env,target=GITLAB_TOKEN` (or
-`GITHUB_TOKEN`) only for declared entries. Secrets must exist in the same
-Podman connection used by the runner; Podman fails startup if one is missing.
-Values are never written to images or profile files. Container processes,
-including Pi extensions, can access the resulting environment variables.
-`--dry-run` prints references only and does not read or create secrets.
+The runner adds `--secret NAME,type=env,target=GITLAB_TOKEN` (or `GITHUB_TOKEN`) only for declared entries. Secrets must exist in the same Podman connection used by the runner; Podman fails startup if one is missing. Values are never written to images or profile files. Container processes, including Pi extensions, can access the resulting environment variables. `--dry-run` prints references only and does not read or create secrets.
 
 ## Project startup configuration
 
-If the resolved workspace contains a readable, non-symlinked `.pisandboxrc`, it
-is applied before the sandbox starts. This makes shareable project startup
-settings explicit without executing repository-controlled shell code:
+If the resolved workspace contains a readable `.pisandboxrc` file that is not a symbolic link, the runner applies its settings before the sandbox starts. This makes shareable project startup settings explicit without executing repository-controlled shell code:
 
 ```ini
 NAME=backend
@@ -142,18 +113,11 @@ PI_EXTENSION=npm:@acme/pi-tools@1.2.3
 PI_EXTENSION=./tools/local-pi-package
 ```
 
-`NAME` is allowed once. `PORT`, `MOUNT`, and `PI_EXTENSION` are repeatable.
-Global configuration is applied first, then `.pisandboxrc`, then CLI options;
-therefore `--name` wins over `NAME`, while CLI mounts and ports are appended.
+`PROFILE=golang` selects the default image profile and may appear once; an explicit CLI profile or `--image` takes precedence. `--init` with a positional profile writes this setting into the new file. `NAME` is allowed once. `PORT`, `MOUNT`, and `PI_EXTENSION` are repeatable. Global configuration is applied first, then `.pisandboxrc`, then CLI options; therefore `--name` takes precedence over `NAME`, while CLI mounts and ports are appended.
 
-Each port number must be from 1 through 65535. Extensions are installed with
-`pi install -l` in the workspace before Pi starts, so Pi records them in
-`.pi/settings.json` and keeps packages project-local. Extension sources must be
-`npm:`, `git:`, `http(s):`, or an existing workspace-relative `./` path. Since
-Pi extensions run with full permissions, review and trust every declared
-source. `--dry-run` prints the install command without running it.
+Each port number must be from 1 through 65535. Extensions are installed with `pi install -l` in the workspace before Pi starts, so Pi records them in `.pi/settings.json` and keeps packages project-local. Extension sources must be `npm:`, `git:`, `http(s):`, or an existing workspace-relative `./` path. Extensions can use the permissions and credentials available inside the container, so review and trust every declared source. `--dry-run` prints the install command without running it.
 
-Run `pi-sandbox-run --init` to copy the standard template into the resolved workspace. Add `--name backend` to write `NAME=backend` into the new file. It refuses to replace an existing `.pisandboxrc`. You can also use `templates/pisandboxrc.template` directly.
+Run `pi-sandbox-run --init` to copy the standard template into the resolved workspace. Add `--name backend` to write `NAME=backend` into the new file. The command does not replace an existing `.pisandboxrc`. You can also use `templates/pisandboxrc.template` directly.
 
 ## Starting directory
 
@@ -163,13 +127,11 @@ The selected host directory keeps its name inside the container. For example:
 $HOME/src/team/backend -> /home/pi/backend
 ```
 
-Pi starts in `/home/pi/backend`, not in a generic `workspace` directory. The
-same rule applies when the starting directory is selected with `--workspace`.
+Pi starts in `/home/pi/backend`, not in a generic `workspace` directory. The same rule applies when the starting directory is selected with `--workspace`.
 
 ## Bind-mount restrictions
 
-The starting directory and every extra bind-mount source are validated in the
-same way. Each source must:
+The starting directory and every extra bind-mount source are validated in the same way. Each source must:
 
 - be an existing directory, not a file;
 - be a strict subdirectory of a root listed in the `allowed-roots` file;
@@ -179,12 +141,7 @@ same way. Each source must:
 - contain no `.` or `..` traversal components;
 - contain no hidden directory component whose name starts with `.`.
 
-The source may be nested at any depth below an approved root; it does not need
-to be a direct child. The approved roots themselves cannot be mounted. For
-example, with the default `$HOME/src` root, `$HOME/src/team/project/shared` is
-allowed, but `$HOME/src` and `/` are rejected. A relative source is
-accepted only when it starts with `./`, such as `./shared-libs`; `../project`
-and `shared-libs` are rejected.
+The source may be nested at any depth below an approved root; it does not need to be a direct child. The approved roots themselves cannot be mounted. For example, with the default `$HOME/src` root, `$HOME/src/team/project/shared` is allowed, but `$HOME/src` and `/` are rejected. A relative source is accepted only when it starts with `./`, such as `./shared-libs`; `../project` and `shared-libs` are rejected.
 
 ## Allowed roots
 
@@ -194,15 +151,13 @@ Allowed roots are read from:
 ${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/allowed-roots
 ```
 
-The file is created automatically with this default entry, and `$HOME/src` is
-created if it does not already exist:
+During a normal run, the runner creates the file with the following default entry and creates `$HOME/src` if that directory does not already exist:
 
 ```text
 $HOME/src
 ```
 
-Each non-comment line is an absolute directory path. Entries can be edited by
-hand to authorize any host location, for example:
+Each non-comment line is an absolute directory path. Entries can be edited manually to authorize a host location, for example:
 
 ```text
 /home/you/src
@@ -210,17 +165,11 @@ hand to authorize any host location, for example:
 /mnt/shared/customer-a
 ```
 
-Every entry must already be a directory. Filesystem roots, hidden components,
-`.`/`..`, empty components, and symbolic-link components are rejected. An empty
-file disables all host directory mounts, including the starting directory.
+Every entry must already be a directory. Filesystem roots, hidden components, `.`/`..`, empty components, and symbolic-link components are rejected. An empty file disables all host directory mounts, including the starting directory.
 
-Validation applies only to the selected source directory and the components of
-its path. The directory contents are not scanned or restricted: they may contain
-hidden files/directories, regular files, and symbolic links.
+Validation applies only to the selected source directory and the components of its path. The directory contents are not scanned or restricted: they may contain hidden files and directories, regular files, and symbolic links.
 
-Mount destinations must be absolute, cannot be `/`, and cannot contain empty,
-`.`/`..`, or hidden path components. Optional mount mode is limited to `ro` or
-`rw`.
+Mount destinations must be absolute, cannot be `/`, and cannot contain empty, `.`/`..`, or hidden path components. The optional mount mode is limited to `ro` or `rw`.
 
 ## Profiles
 
