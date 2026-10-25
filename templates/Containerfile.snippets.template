@@ -3,6 +3,9 @@
 RUN arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=amd64;; arm64) a=arm64;; *) exit 1;; esac; \
     mkdir -p "${XDG_DATA_HOME}/go-sdk" && \
     curl -fsSLo /tmp/go.tgz "https://go.dev/dl/go{{VERSION}}.linux-${a}.tar.gz" && \
+    curl -fsSLo /tmp/go-releases.json 'https://go.dev/dl/?mode=json&include=all' && \
+    expected="$(jq -r --arg version 'go{{VERSION}}' --arg file "go{{VERSION}}.linux-${a}.tar.gz" '.[] | select(.version == $version) | .files[] | select(.filename == $file) | .sha256' /tmp/go-releases.json)" && \
+    test "${#expected}" = 64 && printf '%s  /tmp/go.tgz\n' "$expected" | sha256sum -c - && rm /tmp/go-releases.json && \
     tar -C "${XDG_DATA_HOME}/go-sdk" --strip-components=1 -xzf /tmp/go.tgz && rm /tmp/go.tgz
 ENV GOROOT="${XDG_DATA_HOME}/go-sdk" GOPATH="${XDG_DATA_HOME}/go"
 ENV PATH="${GOROOT}/bin:${GOPATH}/bin:${PATH}"
@@ -18,6 +21,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 RUN arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=x64;; arm64) a=aarch64;; *) exit 1;; esac; \
     mkdir -p "${XDG_DATA_HOME}/java" && \
     curl -fsSL "https://api.adoptium.net/v3/binary/version/jdk-{{VERSION}}/linux/${a}/jdk/hotspot/normal/eclipse" -o /tmp/jdk.tgz && \
+    curl -fsSL "https://api.adoptium.net/v3/checksum/version/jdk-{{VERSION}}/linux/${a}/jdk/hotspot/normal/eclipse" -o /tmp/jdk.sha256 && \
+    printf '%s  /tmp/jdk.tgz\n' "$(awk '{print $1; exit}' /tmp/jdk.sha256)" | sha256sum -c - && rm /tmp/jdk.sha256 && \
     tar -xzf /tmp/jdk.tgz -C "${XDG_DATA_HOME}/java" --strip-components=1 && rm /tmp/jdk.tgz
 ENV JAVA_HOME="${XDG_DATA_HOME}/java"
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
@@ -43,13 +48,17 @@ ENV PATH="${FNM_DIR}:${PATH}"
 @@ playwright
 # Install the Playwright CLI, all bundled browsers and their Debian dependencies,
 # plus the Playwright MCP server while this stage still runs as root.
-RUN npm install --global "playwright@{{VERSION}}" @playwright/mcp && \
+RUN npm install --global "playwright@{{VERSION}}" "@playwright/mcp@0.0.83" && \
     playwright install --with-deps chromium firefox webkit && \
     npm cache clean --force
 @@ caddy
 # Caddy is installed in the user's XDG bin directory.
 RUN arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=amd64;; arm64) a=arm64;; *) exit 1;; esac; \
     curl -fsSLo /tmp/caddy.tar.gz "https://github.com/caddyserver/caddy/releases/download/v{{VERSION}}/caddy_{{VERSION}}_linux_${a}.tar.gz" && \
+    curl -fsSLo /tmp/caddy-checksums.txt "https://github.com/caddyserver/caddy/releases/download/v{{VERSION}}/caddy_{{VERSION}}_checksums.txt" && \
+    expected="$(awk -v asset="caddy_{{VERSION}}_linux_${a}.tar.gz" '$2 == asset { print $1 }' /tmp/caddy-checksums.txt)" && \
+    case "${#expected}" in 64) checker=sha256sum;; 128) checker=sha512sum;; *) exit 1;; esac && \
+    printf '%s  /tmp/caddy.tar.gz\n' "$expected" | "$checker" -c - && rm /tmp/caddy-checksums.txt && \
     tar -xzf /tmp/caddy.tar.gz -C "${XDG_BIN_HOME}" caddy && rm /tmp/caddy.tar.gz && \
     chmod +x "${XDG_BIN_HOME}/caddy" && caddy version
 @@ shell-command

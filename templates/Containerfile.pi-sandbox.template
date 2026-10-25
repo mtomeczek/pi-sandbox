@@ -1,22 +1,35 @@
+# pi-sandbox template revision: 2
 ARG BASE_IMAGE=node:24-bookworm-slim
 FROM ${BASE_IMAGE} AS runtime
 ARG PI_VERSION
+ARG GLAB_VERSION=1.124.0
 ARG USER_NAME=pi
 ARG USER_UID=1000
 ARG USER_GID=1000
 ENV DEBIAN_FRONTEND=noninteractive
-# Bookworm ships glab in backports; newer Debian releases include it directly.
-RUN set -eux; \
-    . /etc/os-release; \
-    if [ "${VERSION_CODENAME:-}" = bookworm ]; then \
-      printf '%s\n' 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/pi-sandbox-backports.list; \
-    fi; \
-    apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates git gh glab curl jq ripgrep fd-find fzf less procps openssh-client unzip xz-utils tar \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash ca-certificates git gh curl jq ripgrep fd-find fzf less procps openssh-client unzip xz-utils tar \
 {{APT_PACKAGES}}
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
-    && gh --version && glab --version \
+    && gh --version \
     && rm -rf /var/lib/apt/lists/*
+# Debian's glab package is too old for OAuth device login. Install upstream.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64|arm64) ;; *) echo "Unsupported glab architecture: $arch" >&2; exit 1;; esac; \
+    work="$(mktemp -d)"; cd "$work"; \
+    asset="glab_${GLAB_VERSION}_linux_${arch}.tar.gz"; \
+    release="https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads"; \
+    curl -fsSLo "$asset" "$release/$asset"; \
+    curl -fsSLo checksums.txt "$release/checksums.txt"; \
+    awk -v asset="$asset" '$2 == asset { print }' checksums.txt > selected-checksum.txt; \
+    test -s selected-checksum.txt; \
+    sha256sum -c selected-checksum.txt; \
+    tar -xzf "$asset" bin/glab; \
+    install -m 0755 bin/glab /usr/local/bin/glab; \
+    cd /; rm -rf "$work"; \
+    glab --version; \
+    glab auth login --help | grep -q -- '--device'
 # PI_VERSION may be an exact version or an npm dist-tag such as "latest".
 # Install Pi directly in the final runtime stage so npm preserves its package layout.
 RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \

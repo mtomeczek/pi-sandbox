@@ -34,10 +34,21 @@ jobs:
             pi-sandbox-create \
             pi-sandbox-run \
             pi-sandbox-setup \
-            tests/allowed-roots.sh \
-            tests/macos-compat.sh \
-            tests/release-policy.sh \
-            tests/setup.sh
+            tests/*.sh
+      - name: Test profile management and Bash improvements
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 -B tests/test_profile_manager.py
+          bash tests/improvements.sh
+          bash tests/standard-image.sh
+          bash tests/profile-secrets.sh
+          bash tests/host-env.sh
+          bash tests/allowed-roots.sh
+          bash tests/image-listing.sh
+          bash tests/repository-env.sh
+          bash tests/macos-compat.sh
+          bash tests/setup.sh
       - name: Verify release policy defaults
         env:
           PODMAN_VERSION: 6.0.0
@@ -54,6 +65,17 @@ jobs:
         run: >-
           Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
           -ErrorAction Stop
+      - name: Test profile management and PowerShell improvements
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -B tests/test_profile_manager.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/improvements.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/repository-env.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Lint PowerShell scripts
         shell: pwsh
         run: |

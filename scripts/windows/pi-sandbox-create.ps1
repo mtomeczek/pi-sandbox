@@ -19,7 +19,7 @@ $ConfigTemplate = Join-Path $ScriptDir 'templates\create.config.template'
 $ProfileTemplate = Join-Path $ScriptDir 'templates\profile.template'
 $HelpFile = Join-Path $ScriptDir 'docs\pi-sandbox-create.windows.md'
 
-$Image = 'pi-sandbox:latest'; $BaseImage = 'node:24-bookworm-slim'; $PiVersion = '0.84.2'
+$Image = 'pi-sandbox:latest'; $BaseImage = 'node:24-bookworm-slim'; $PiVersion = '1.4.0'
 $ContainerUser = 'pi'; $ContainerUid = '1000'; $ContainerGid = '1000'; $VerboseMode = $false
 $ProfileName = ''; $ProfileFile = ''; $Containerfile = Join-Path $ContainerfileDir 'Containerfile.pi-sandbox'
 $CreateProfile = $false; $Build = $false; $Update = $false; $NoCache = $false; $Pull = $false; $Regenerate = $false; $DryRun = $false; $ShowInfo = $false; $ListImages = $false; $CleanImage = $false; $Yes = $false
@@ -34,9 +34,33 @@ function Log([string]$Message) {
 function Test-Tool([string]$Name) {
     return $Name -in @('go', 'rust', 'jvm', 'uv', 'fnm', 'python', 'caddy', 'playwright')
 }
+$ReadOnlyConfig = $false; $CliImage = ''; $ValidateOnly = $false; $CheckUpdates = $false; $UpgradeProfile = $false; $PatchOnly = $false; $Online = $false
+function Invoke-ProfileManager([string[]]$Arguments, [string]$Content = '') {
+    $python = $null
+    foreach ($candidate in @(Get-Command python, python3 -ErrorAction SilentlyContinue)) {
+        & $candidate.Source -c 'import sys; sys.exit(sys.version_info < (3, 9))' *> $null
+        if ($LASTEXITCODE -eq 0) { $python = $candidate; break }
+    }
+    if (-not $python) { Fail 'Python 3.9+ is required for image preflight and profile management' }
+    $manager = Join-Path $ScriptDir 'scripts/profile-manager.py'
+    if ($Content) { $Content | & $python.Source $manager @Arguments }
+    else { & $python.Source $manager @Arguments }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+function Get-EffectiveManifest {
+    if ($ProfileName) { "PROFILE=$ProfileName" }
+    "BASE_IMAGE=$BaseImage"; "PI_VERSION=$PiVersion"
+    foreach ($x in $ToolSpecs) { "TOOL=$x" }
+    foreach ($x in $ExtensionSpecs) { "EXTENSION=$x" }
+    foreach ($x in $NpmSpecs) { "NPM=$x" }
+    foreach ($x in $ManifestEnvs) { "ENV=$x" }
+    foreach ($x in $ManifestPaths) { "PATH=$x" }
+    foreach ($x in $ManifestApt) { "APT=$x" }
+    foreach ($x in $ManifestShellCommands) { "SHELL_COMMAND=$x" }
+}
 function Test-NpmSpec([string]$Spec) {
-    if ($Spec -notmatch '^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[-^~A-Za-z0-9][-A-Za-z0-9._+~^]*)?$') {
-        Fail "invalid npm package '$Spec' (expected PACKAGE[@VERSION])"
+    if (-not $Spec -or $Spec.StartsWith('-') -or $Spec -match "[\r\n]") {
+        Fail 'invalid npm specification (expected PACKAGE[@VERSION])'
     }
 }
 function Show-Command([string[]]$Command) {
@@ -88,7 +112,7 @@ function Get-Value([string]$Line) {
 }
 function Import-Config {
     if (-not (Test-Path -LiteralPath $ConfigFile)) {
-        Write-DefaultConfig; return
+        if (-not ($DryRun -or $ReadOnlyConfig)) { Write-DefaultConfig }; return
     }
     $n = 0; foreach ($raw in Get-Content -LiteralPath $ConfigFile) {
         $n++; $line = $raw.Trim(); if (-not $line -or $line.StartsWith('#')) {
@@ -138,6 +162,10 @@ function Write-Manifest {
         Fail "profile manifest template not found: $ProfileTemplate"
     }
     [IO.Directory]::CreateDirectory($ProfilesDir) | Out-Null
+    if (Test-Path -LiteralPath $ProfileFile) {
+        if (-not (Confirm "Replace existing profile '$ProfileName'? A backup will be created.")) { exit 1 }
+        Copy-Item -LiteralPath $ProfileFile -Destination ($ProfileFile + '.bak-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fffffff'))
+    }
     $lines = [Collections.Generic.List[string]]::new(); $lines.Add([IO.File]::ReadAllText($ProfileTemplate).TrimEnd()); $lines.Add(''); $lines.Add("# pi-sandbox image manifest: $ProfileName"); $lines.Add("# Generated $([DateTime]::UtcNow.ToString('o'))"); $lines.Add("PROFILE=$ProfileName"); $lines.Add("BASE_IMAGE=$BaseImage"); $lines.Add("PI_VERSION=$PiVersion")
     foreach ($x in $ToolSpecs) {
         $lines.Add("TOOL=$x")
@@ -317,9 +345,11 @@ function Get-SandboxImageTag {
     return "$repository`:pi-sandbox"
 }
 function Set-SandboxImageTag {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
     $tag = Get-SandboxImageTag
     if ($DryRun -or $VerboseMode) { Show-Command @('podman', 'tag', $Image, $tag) }
-    if (-not $DryRun) { & podman tag $Image $tag; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+    if (-not $DryRun -and $PSCmdlet.ShouldProcess($Image, 'Add sandbox image tag')) { & podman tag $Image $tag; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 }
 function List-SandboxImages {
     & podman image ls --format '{{.Repository}}`t{{.Tag}}`t{{.ID}}`t{{.CreatedSince}}`t{{.Size}}' |
@@ -330,6 +360,8 @@ function Usage {
 }
 
 for ($i = 0; $i -lt $args.Count; $i++) {
+    if ($args[$i] -eq '--dry-run') { $DryRun = $true }
+    if ($args[$i] -in @('--check-updates','--upgrade','--validate','--info','--list-images')) { $ReadOnlyConfig = $true }
     if ($args[$i] -eq '--config') {
         if ($i + 1 -ge $args.Count) {
             Fail '--config requires FILE'
@@ -341,15 +373,22 @@ if ($args.Count -eq 1 -and $args[0] -in @('--help', '-h')) {
 }; Import-Config
 $idx = 0; if ($idx -lt $args.Count -and -not $args[$idx].StartsWith('-')) {
     $ProfileName = $args[$idx]; $idx++
+    if ($ProfileName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { Fail 'invalid profile name' }
+    Invoke-ProfileManager @('validate', '--file', (Join-Path $ProfilesDir "$ProfileName.profile")) | Out-Null
+    Import-Manifest
 }
 while ($idx -lt $args.Count) {
+    if ($args[$idx] -in @('--extension','--npm','--env','--path','--apt','--shell-command','--project-node')) { $Regenerate = $true }
+    if ($args[$idx] -in @('--tool','--extension','--npm','--env','--path','--apt','--shell-command','--project-node','--pi-version','--base-image','--image','--container-user','--container-uid','--container-gid','--create','--config') -and $idx + 1 -ge $args.Count) { Fail "$($args[$idx]) requires a value" }
     $a = $args[$idx]; switch ($a) {
         '--create' {
             $idx++; if ($idx -ge $args.Count) {
                 Fail '--create requires PROFILE'
             }; $ProfileName = $args[$idx]; $CreateProfile = $true
         }; '--tool' {
-            $idx++; $ToolSpecs.Add($args[$idx])
+            $idx++; $toolName = ($args[$idx] -split '@', 2)[0]
+            for ($n = $ToolSpecs.Count - 1; $n -ge 0; $n--) { if (($ToolSpecs[$n] -split '@', 2)[0] -eq $toolName) { $ToolSpecs.RemoveAt($n) } }
+            $ToolSpecs.Add($args[$idx]); $Regenerate = $true
         }; '--extension' {
             $idx++; $ExtensionSpecs.Add($args[$idx])
         }; '--npm' {
@@ -381,7 +420,7 @@ while ($idx -lt $args.Count) {
         }; '--base-image' {
             $idx++; $BaseImage = $args[$idx]
         }; '--image' {
-            $idx++; $Image = $args[$idx]
+            $idx++; $Image = $args[$idx]; $CliImage = $Image
         }; '--container-user' {
             $idx++; $ContainerUser = $args[$idx]
         }; '--container-uid' {
@@ -390,6 +429,11 @@ while ($idx -lt $args.Count) {
             $idx++; $ContainerGid = $args[$idx]
         }; '--config' {
             $idx++
+        }; '--validate' { $ValidateOnly = $true
+        }; '--online' { $Online = $true
+        }; '--check-updates' { $CheckUpdates = $true
+        }; '--upgrade' { $UpgradeProfile = $true
+        }; '--patch-only' { $PatchOnly = $true
         }; '--info' {
             $ShowInfo = $true
         }; '--list-images' {
@@ -418,6 +462,22 @@ if ($ProfileName -and $ProfileName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
 }; if ($ContainerUid -notmatch '^\d+$' -or $ContainerGid -notmatch '^\d+$') {
     Fail 'container UID and GID must be numeric'
 }
+if ($CheckUpdates -or $UpgradeProfile) {
+    if (-not $ProfileFile) { Fail 'Select an existing profile for version management' }
+    $managerArgs = @($(if ($UpgradeProfile) { 'upgrade' } else { 'audit' }), '--file', $ProfileFile)
+    if ($PatchOnly) { $managerArgs += '--patch-only' }
+    if ($Yes) { $managerArgs += '--yes' }
+    if ($DryRun) { $managerArgs += '--dry-run' }
+    Invoke-ProfileManager $managerArgs; exit 0
+}
+if (-not $ListImages -and -not $CleanImage) {
+    $managerArgs = @('validate', '--file', '-')
+    if ($Online) { $managerArgs += '--online' }
+    $effectiveLines = @(Get-EffectiveManifest)
+    foreach ($entry in $effectiveLines) { if ($entry -match "[\r\n]") { Fail 'Profile values must be single-line' } }
+    Invoke-ProfileManager $managerArgs ($effectiveLines -join "`n") | Out-Null
+}
+if ($ValidateOnly) { Log 'Profile validation passed'; exit 0 }
 if ($CreateProfile) {
     if (-not $ProfileName) {
         Fail '--create requires a profile'
@@ -427,10 +487,7 @@ if ($CreateProfile) {
         $tool = $spec.Split('@')[0]; if (-not(Test-Tool $tool)) {
             Fail "unsupported tool '$tool'"
         }
-    }; $Image = "pi-sandbox-$ProfileName`:latest"; $Containerfile = Join-Path $ContainerfileDir "Containerfile.pi-sandbox.$ProfileName"; Write-Manifest; $Regenerate = $true; $Update = $true
-}
-elseif ($ProfileName) {
-    Import-Manifest
+    }; $Image = if ($CliImage) { $CliImage } else { "pi-sandbox-$ProfileName`:latest" }; $Containerfile = Join-Path $ContainerfileDir "Containerfile.pi-sandbox.$ProfileName"; Write-Manifest; $Regenerate = $true; $Update = $true
 }
 if ($ShowInfo) {
     Write-Output "pi-sandbox build configuration"; Write-Output "  profile:       $(if($ProfileName){$ProfileName}else{'default'})"; Write-Output "  manifest:      $(if($ProfileFile){$ProfileFile}else{'none'})"; Write-Output "  image:         $Image"; Write-Output "  containerfile: $Containerfile"; Write-Output "  base image:    $BaseImage"; Write-Output "  Pi version:    $PiVersion"; Write-Output "  tools:         $($ToolSpecs -join ' ')"; Write-Output "  extensions:    $($ExtensionSpecs -join ' ')"; exit 0
@@ -452,20 +509,37 @@ if ($CleanImage) {
         Write-Output "Image '$Image' does not exist."
     }; exit 0
 }
+if (($Build -or $Update) -and -not $Regenerate -and (Test-Path -LiteralPath $Containerfile)) {
+    $generatedTime = (Get-Item -LiteralPath $Containerfile).LastWriteTimeUtc
+    $stale = -not ([IO.File]::ReadAllText($Containerfile).Contains('# pi-sandbox template revision: 2'))
+    foreach ($source in @($ContainerfileTemplate, $SnippetTemplate, $ProfileFile)) {
+        if ($source -and (Test-Path -LiteralPath $source) -and (Get-Item -LiteralPath $source).LastWriteTimeUtc -gt $generatedTime) { $stale = $true }
+    }
+    if ($stale) { Fail 'Saved Containerfile is stale; rerun with --regenerate-containerfile --update' }
+}
 if ($Regenerate -or -not(Test-Path -LiteralPath $Containerfile)) {
     Write-Containerfile
 }
 if ($Update -or $Build) {
-    $shouldBuild = $Update -or -not(Test-Image); if ($shouldBuild) {
+    $shouldBuild = $Update -or $DryRun -or -not(Test-Image); if ($shouldBuild) {
+        if ($DryRun -and -not $Update) { Write-Output "# Build image only if missing: $Image" }
         Log "Building $Image"; $buildArgs = [Collections.Generic.List[string]]::new(); $buildArgs.AddRange([string[]]@('build', '--tag', $Image, '--build-arg', "BASE_IMAGE=$BaseImage", '--build-arg', "PI_VERSION=$PiVersion", '--build-arg', "USER_NAME=$ContainerUser", '--build-arg', "USER_UID=$ContainerUid", '--build-arg', "USER_GID=$ContainerGid", '--file', $Containerfile)); if ($NoCache) {
             $buildArgs.Add('--no-cache')
         }; if ($Pull) {
             $buildArgs.Add('--pull=always')
-        }; $buildArgs.Add((New-TemporaryFile).DirectoryName); if ($DryRun -or $VerboseMode) {
-            Show-Command (@('podman') + $buildArgs.ToArray())
-        }; if (-not$DryRun) {
-            & podman @buildArgs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Set-SandboxImageTag; exit 0
-        }; Set-SandboxImageTag
+        }; $buildArgs.AddRange([string[]]@('--label', "io.pi-sandbox.profile=$(if($ProfileName){$ProfileName}else{'default'})", '--label', "io.pi-sandbox.pi-version=$PiVersion", '--label', "io.pi-sandbox.tools=$($ToolSpecs -join ',')", '--label', "io.pi-sandbox.npm=$($NpmSpecs -join ',')", '--label', 'io.pi-sandbox.capabilities=gh,glab-device', '--label', 'io.pi-sandbox.template-version=2', '--label', "org.opencontainers.image.created=$([DateTime]::UtcNow.ToString('o'))")); $context = Join-Path ([IO.Path]::GetTempPath()) ('pi-sandbox-build-' + [guid]::NewGuid()); $buildArgs.Add($context)
+        try {
+            if ($DryRun -or $VerboseMode) { Show-Command (@('podman') + $buildArgs.ToArray()) }
+            if (-not $DryRun) {
+                [IO.Directory]::CreateDirectory($context) | Out-Null
+                & podman @buildArgs
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+            Set-SandboxImageTag
+        }
+        finally {
+            if (Test-Path -LiteralPath $context) { Remove-Item -LiteralPath $context -Recurse -Force }
+        }
     }
     else {
         Log "Image already exists: $Image"; Set-SandboxImageTag

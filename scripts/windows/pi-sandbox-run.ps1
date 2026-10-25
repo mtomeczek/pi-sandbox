@@ -53,6 +53,17 @@ $ProjectRcFile = ''
 $ProfileName = ''
 $PiArgs = [System.Collections.Generic.List[string]]::new()
 $AllowedRoots = [System.Collections.Generic.List[string]]::new()
+$CliProfileSet = $false; $Doctor = $false; $PersistCliAuth = $false; $ResetCliAuth = $false
+function Invoke-RunnerDoctor([string[]]$Arguments) {
+    foreach ($python in @(Get-Command python, python3 -ErrorAction SilentlyContinue)) {
+        & $python.Source -c 'import sys; sys.exit(sys.version_info < (3, 9))' *> $null
+        if ($LASTEXITCODE -eq 0) {
+            & $python.Source (Join-Path $ScriptDir 'scripts/profile-manager.py') @Arguments
+            exit $LASTEXITCODE
+        }
+    }
+    Fail '--doctor requires Python 3.9+'
+}
 
 function Fail([string]$Message) {
     throw "error: $Message"
@@ -66,7 +77,12 @@ function Quote-Arg([string]$Value) {
     }; return $Value
 }
 function Show-Command([string[]]$Command) {
-    Write-Output ('+ ' + (($Command | ForEach-Object { Quote-Arg $_ }) -join ' '))
+    $display = [Collections.Generic.List[string]]::new(); $previous = ''
+    foreach ($argument in $Command) {
+        $value = if ($previous -eq '--env' -and $argument.Contains('=')) { ($argument -split '=', 2)[0] + '=<redacted>' } else { $argument }
+        $display.Add((Quote-Arg $value)); $previous = $argument
+    }
+    Write-Output ('+ ' + ($display -join ' '))
 }
 
 function Render-Template([string]$Template, [string]$Output, [hashtable]$Values) {
@@ -114,7 +130,7 @@ function Get-ConfigValue([string]$Line) {
 
 function Load-Config {
     if (-not (Test-Path -LiteralPath $ConfigFile)) {
-        Write-DefaultConfig; return
+        if (-not ($Doctor -or $DryRun)) { Write-DefaultConfig }; return
     }
     $lineNumber = 0
     foreach ($rawLine in Get-Content -LiteralPath $ConfigFile) {
@@ -189,13 +205,14 @@ function Load-ProjectConfig {
     if (-not (Test-Path -LiteralPath $ProjectRcFile)) { return }
     $item = Get-Item -LiteralPath $ProjectRcFile -Force
     if (-not $item.PSIsContainer -and -not (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { } else { Fail "project configuration must be a non-symlinked file: $ProjectRcFile" }
-    $nameSet = $false; $lineNumber = 0
+    $nameSet = $false; $profileSet = $false; $lineNumber = 0
     foreach ($rawLine in Get-Content -LiteralPath $ProjectRcFile) {
         $lineNumber++; $line = $rawLine.Trim()
         if (-not $line -or $line.StartsWith('#')) { continue }
         if (-not $line.Contains('=')) { Fail "${ProjectRcFile}:${lineNumber}: expected KEY=VALUE" }
         $key = $line.Substring(0, $line.IndexOf('=')).Trim(); $value = Get-ConfigValue $line
         switch ($key) {
+            'PROFILE' { if ($profileSet) { Fail 'PROFILE may only be specified once' }; if (-not $CliProfileSet) { $script:ProfileName = $value }; $profileSet = $true }
             'NAME' { if ($nameSet) { Fail "${ProjectRcFile}:${lineNumber}: NAME may only be specified once" }; if (-not $InstanceName) { $script:InstanceName = $value }; $nameSet = $true }
             'PORT' { $script:ForwardedPorts.Add($value) }
             'MOUNT' { if ($value -like './*:*') { $value = (Join-Path $HostWorkspace $value.Substring(2)) }; $script:ExtraMounts.Add($value) }
@@ -237,6 +254,7 @@ function Test-PathBelow([string]$Child, [string]$Parent) {
 
 function Load-AllowedRoots {
     if (-not (Test-Path -LiteralPath $AllowedRootsFile)) {
+        if ($Doctor -or $DryRun) { $script:AllowedRoots.Clear(); $script:AllowedRoots.Add((Join-Path $HOME 'src')); return }
         Write-DefaultAllowedRoots
     }
     $script:AllowedRoots.Clear()
@@ -325,52 +343,6 @@ function Parse-Mount([string]$Spec) {
     return "$source`:$($Matches.target):$mode"
 }
 
-function Get-RepositoryEnvironment {
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return }
-    if ((& git -C $HostWorkspace rev-parse --is-inside-work-tree 2>$null) -ne 'true') { return }
-    foreach ($identity in @(
-        @('user.name', 'GIT_AUTHOR_NAME', 'GIT_COMMITTER_NAME'),
-        @('user.email', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_EMAIL')
-    )) {
-        $value = @(& git -C $HostWorkspace config --get $identity[0] 2>$null) -join "`n"
-        if ($value -and $value -notmatch "[\r\n]") {
-            '--env'; "$($identity[1])=$value"
-            '--env'; "$($identity[2])=$value"
-        }
-    }
-    $remote = 'origin'
-    $url = @(& git -C $HostWorkspace config --get "remote.$remote.url" 2>$null) -join "`n"
-    if (-not $url) {
-        $remotes = @(& git -C $HostWorkspace remote 2>$null)
-        if (-not $remotes.Count) { return }
-        $remote = $remotes[0]
-        $url = @(& git -C $HostWorkspace config --get "remote.$remote.url" 2>$null) -join "`n"
-    }
-    if ($url -match "[\r\n]") { return }
-    $login = ''
-    if ($url -cmatch '^(https?|ssh|git)://([^/]+)/(.+)$') {
-        $scheme = $Matches[1]; $authority = $Matches[2]; $repoPath = $Matches[3]
-        if ($authority.Contains('@')) { $login = ($authority.Substring(0, $authority.LastIndexOf('@')) -split ':', 2)[0] }
-        $repoHost = ($authority -split '@')[-1]
-        if ($scheme -in @('ssh', 'git')) { $repoHost = ($repoHost -split ':', 2)[0] }
-    }
-    elseif ($url -cmatch '^([^/@:]+@)?([A-Za-z0-9][A-Za-z0-9.-]*):(.+)$') {
-        $login = $Matches[1] -replace '@$', ''; $repoHost = $Matches[2]; $repoPath = $Matches[3]; $scheme = 'ssh'
-    }
-    else { return }
-    $repoPath = (($repoPath -split '[?#]', 2)[0] -replace '/$', '') -replace '\.git$', ''
-    if ($repoHost -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?$' -or
-        $repoPath -cnotmatch '^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$') { return }
-    '--env'; "GH_HOST=$repoHost"
-    '--env'; "GH_REPO=$repoHost/$repoPath"
-    '--env'; "GITLAB_HOST=$repoHost"
-    '--env'; "GITLAB_API_HOST=$repoHost"
-    '--env'; "GITLAB_REPO=$repoPath"
-    '--env'; "GLAB_API_PROTOCOL=$(if ($scheme -eq 'http') { 'http' } else { 'https' })"
-    # Transport login is metadata only, not the authenticated service account.
-    if ($login -cmatch '^[A-Za-z0-9_.-]+$') { '--env'; "GIT_REMOTE_USER=$login" }
-}
-
 function Get-ProfileSecrets {
     if (-not $ProfileName) { return }
     $file = Join-Path (Split-Path -Parent $ConfigFile) "profiles/$ProfileName.profile"
@@ -416,14 +388,17 @@ function Initialize-ProjectConfig {
     if ($InstanceName -and $InstanceName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         Fail "invalid sandbox name '$InstanceName'"
     }
+    if ($ProfileName -and $ProfileName -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { Fail 'Invalid profile name' }
     if ($DryRun) {
-        if ($InstanceName) { Show-Command @('Create-ProjectConfig', $target, "NAME=$InstanceName") }
+        if ($InstanceName -or $ProfileName) { Show-Command @('Create-ProjectConfig', $target, "PROFILE=$ProfileName", "NAME=$InstanceName") }
         else { Show-Command @('Copy-Item', $ProjectRcTemplate, $target) }
         return
     }
-    if ($InstanceName) {
+    if ($InstanceName -or $ProfileName) {
         $content = [System.IO.File]::ReadAllText($ProjectRcTemplate)
-        [System.IO.File]::WriteAllText($target, ($content -replace '(?m)^# NAME=.*$', "NAME=$InstanceName"))
+        if ($InstanceName) { $content = $content -replace '(?m)^# NAME=.*$', "NAME=$InstanceName" }
+        if ($ProfileName) { $content = $content -replace '(?m)^# PROFILE=.*$', "PROFILE=$ProfileName" }
+        [System.IO.File]::WriteAllText($target, $content)
     }
     else {
         Copy-Item -LiteralPath $ProjectRcTemplate -Destination $target -ErrorAction Stop
@@ -457,6 +432,9 @@ function Usage {
 
 # Select an alternate config before loading defaults.
 for ($i = 0; $i -lt $args.Count; $i++) {
+    if ($args[$i] -eq '--') { break }
+    if ($args[$i] -eq '--doctor') { $Doctor = $true }
+    if ($args[$i] -eq '--dry-run') { $DryRun = $true }
     if ($args[$i] -eq '--config') {
         if ($i + 1 -ge $args.Count) {
             Fail '--config requires FILE'
@@ -472,7 +450,7 @@ Load-AllowedRoots
 
 $index = 0
 if ($index -lt $args.Count -and -not $args[$index].StartsWith('-')) {
-    $ProfileName = $args[$index]; $index++
+    $ProfileName = $args[$index]; $CliProfileSet = $true; $index++
 }
 while ($index -lt $args.Count) {
     $argument = $args[$index]
@@ -541,8 +519,11 @@ while ($index -lt $args.Count) {
         '--image' {
             $index++; if ($index -ge $args.Count) {
                 Fail '--image requires IMAGE'
-            }; $Image = $args[$index]; $ProfileName = ''
+            }; $Image = $args[$index]; $ProfileName = ''; $CliProfileSet = $true
         }
+        '--doctor' { $Doctor = $true }
+        '--persist-cli-auth' { $PersistCliAuth = $true }
+        '--reset-cli-auth' { $ResetCliAuth = $true }
         '--show-state' {
             $ShowState = $true
         }
@@ -589,6 +570,7 @@ while ($index -lt $args.Count) {
     $index++
 }
 
+if ($Doctor -and ($ResetCliAuth -or $ResetState -or $ShowState -or $ShowInfo -or $InitProjectConfig -or $ListImages)) { Fail '--doctor cannot be combined with other action options' }
 if ($ListImages) {
     Require-Podman
     List-SandboxImages
@@ -623,7 +605,17 @@ elseif ($AgentVolume -eq 'pi-agent' -and $InstanceName -and -not $StateVolumeSet
     $AgentVolume = "pi-agent-$InstanceName"
 }
 
-Require-Podman
+$authVolumes = @("$AgentVolume-gh-auth", "$AgentVolume-glab-auth")
+if (($PersistCliAuth -or $ResetCliAuth) -and $AgentVolume -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$') { Fail 'Invalid state-volume name for auth persistence' }
+if (-not $Doctor) { Require-Podman }
+if ($ResetCliAuth) {
+    if (-not $DryRun -and -not (Confirm "Remove CLI auth volumes for '$AgentVolume'? Saved credentials will be deleted.")) { exit 1 }
+    foreach ($volume in $authVolumes) {
+        if ($DryRun) { Show-Command @('podman', 'volume', 'rm', $volume) }
+        elseif (Podman-Exists @('volume', 'exists', $volume)) { & podman volume rm $volume; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+    }
+    exit 0
+}
 if ($ShowInfo) {
     Write-Output "pi-sandbox runtime configuration"
     Write-Output "  profile:             $(if ($ProfileName) { $ProfileName } else { 'default' })"
@@ -662,7 +654,7 @@ if ($ResetState) {
     }; exit 0
 }
 
-if ($DryRun) {
+if ($DryRun -or $Doctor) {
     Write-Output "# Require existing image: $Image"
 }
 elseif (-not (Podman-Exists ([string[]]@('image', 'exists', $Image)))) {
@@ -676,13 +668,28 @@ $validatedPorts = foreach ($port in $ForwardedPorts) {
 }
 foreach ($extension in $PiExtensions)
 { Test-PiExtension $extension }
+if ($Doctor) {
+    $doctorArgs = [Collections.Generic.List[string]]::new(); $doctorArgs.AddRange([string[]]@('doctor', '--image', $Image))
+    for ($i = 0; $i -lt $profileSecretArgs.Count; $i++) { if ($profileSecretArgs[$i] -eq '--secret') { $doctorArgs.Add('--secret'); $doctorArgs.Add(($profileSecretArgs[$i + 1] -split ',', 2)[0]) } }
+    foreach ($port in $validatedPorts) { $doctorArgs.Add('--port'); $doctorArgs.Add($port) }
+    if ($EnvFile -and -not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) { Fail 'Environment file is not readable' }
+    if ($DryRun) { Write-Output '# Doctor would check Podman, image metadata, secret references and local ports; no changes'; exit 0 }
+    Log 'Workspace, allowed roots, mounts and ports validated'
+    Invoke-RunnerDoctor $doctorArgs.ToArray()
+}
+if ($PersistCliAuth) {
+    foreach ($volume in $authVolumes) {
+        if ($DryRun) { Write-Output "# Ensure CLI auth volume exists: $volume" }
+        elseif (-not (Podman-Exists @('volume', 'exists', $volume))) { & podman volume create $volume | Out-Null; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+    }
+}
 if (-not $DryRun -and -not (Podman-Exists ([string[]]@('volume', 'exists', $AgentVolume)))) {
     Log "Creating Pi state volume: $AgentVolume"; & podman volume create $AgentVolume | Out-Null
 }
 
 $runArgs = [System.Collections.Generic.List[string]]::new()
 $runArgs.AddRange([string[]]@('run', '--rm', '--interactive', '--tty', "--userns=keep-id:uid=$ContainerUid,gid=$ContainerGid", '--cap-drop=ALL', '--security-opt=no-new-privileges', "--pids-limit=$PidsLimit", '--env', "HOME=$ContainerHome", '--env', "USER=$ContainerUser", '--env', "XDG_CONFIG_HOME=$ContainerHome/.config", '--env', "XDG_DATA_HOME=$ContainerHome/.local/share", '--env', "XDG_CACHE_HOME=$ContainerHome/.cache", '--env', "XDG_STATE_HOME=$ContainerHome/.local/state", '--env', "XDG_BIN_HOME=$ContainerHome/.local/bin", '--volume', "$HostWorkspace`:$ContainerStartDir`:rw", '--volume', "$AgentVolume`:$ContainerHome/.pi/agent:rw", '--workdir', $ContainerStartDir))
-$runArgs.AddRange([string[]]@(Get-RepositoryEnvironment))
+if ($PersistCliAuth) { $runArgs.AddRange([string[]]@('--volume', "$($authVolumes[0]):$ContainerHome/.config/gh:rw,U", '--volume', "$($authVolumes[1]):$ContainerHome/.config/glab-cli:rw,U")) }
 $runArgs.AddRange([string[]]$profileSecretArgs)
 if ($Memory) {
     $runArgs.Add('--memory'); $runArgs.Add($Memory)
@@ -714,17 +721,19 @@ foreach ($name in @('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GO
 }
 if ($PiExtensions.Count) {
     Log 'Installing project-local Pi extensions'
-    $bootstrapArgs = [System.Collections.Generic.List[string]]::new(); $bootstrapArgs.AddRange($runArgs); $bootstrapArgs.AddRange([string[]]@('--entrypoint', '/bin/bash', $Image, '-lc', 'for extension in "$@"; do pi install -l "$extension"; done', 'pi')); $bootstrapArgs.AddRange($PiExtensions)
+    $bootstrapArgs = [System.Collections.Generic.List[string]]::new(); $bootstrapArgs.AddRange($runArgs); $bootstrapArgs.AddRange([string[]]@('--entrypoint', '/bin/bash', $Image, '-lc', 'set -e; for extension in "$@"; do pi install -l "$extension" || exit $?; done', 'pi')); $bootstrapArgs.AddRange($PiExtensions)
     if ($DryRun -or $VerboseMode) { Show-Command (@('podman') + $bootstrapArgs.ToArray()) }
     if (-not $DryRun) { & podman @bootstrapArgs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 }
-$runArgs.Add($Image)
 if ($ShellMode) {
     $runArgs.AddRange([string[]]@('--entrypoint', '/bin/bash'))
 }
+$runArgs.Add($Image)
 foreach ($value in $PiArgs) {
     $runArgs.Add($value)
 }
+Write-Output "    profile: $ProfileName; CLI auth persistence: $PersistCliAuth"
+Write-Output "    ports: $($validatedPorts -join ', ')"
 Log 'Starting Pi sandbox'; Write-Output "    image:     $Image"; Write-Output "    start dir:  $HostWorkspace -> $ContainerStartDir"; Write-Output "    state:     $AgentVolume"; Write-Output "    network:   $NetworkMode"
 if ($DryRun -or $VerboseMode) {
     Show-Command (@('podman') + $runArgs.ToArray())

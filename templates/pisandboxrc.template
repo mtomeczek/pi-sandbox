@@ -1,7 +1,8 @@
 # Project-local Pi sandbox startup configuration.
 # This file is declarative data; it is never sourced as shell code.
-# CLI options override NAME and are appended after PORT and MOUNT entries.
+# CLI options override PROFILE and NAME and append after PORT and MOUNT entries.
 
+# PROFILE=golang
 # NAME=backend
 # PORT=3000:3000
 # PORT=9229:9229/tcp

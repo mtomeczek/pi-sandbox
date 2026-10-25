@@ -37,7 +37,7 @@ PROFILE_MANIFEST_TEMPLATE="${SCRIPT_DIR}/templates/profile.template"
 
 IMAGE="pi-sandbox:latest"
 BASE_IMAGE="node:24-bookworm-slim"
-PI_VERSION="0.84.2"
+PI_VERSION="1.4.0"
 CONTAINER_USER="pi"
 CONTAINER_UID=1000
 CONTAINER_GID=1000
@@ -45,6 +45,7 @@ VERBOSE=0
 
 PROFILE=""
 PROFILE_FILE=""
+CLI_IMAGE=""
 CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox"
 CREATE_PROFILE=0
 BUILD=0
@@ -54,6 +55,12 @@ PULL=0
 REGENERATE_CONTAINERFILE=0
 DRY_RUN=0
 SHOW_INFO=0
+VALIDATE_ONLY=0
+CHECK_UPDATES=0
+UPGRADE_PROFILE=0
+PATCH_ONLY=0
+ONLINE=0
+READ_ONLY_CONFIG=0
 LIST_IMAGES=0
 CLEAN_IMAGE=0
 YES=0
@@ -116,10 +123,38 @@ tool_known() {
     esac
 }
 
+profile_manager() {
+    local python
+    python=""
+    local candidate
+    for candidate in python python3; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then python="$candidate"; break; fi
+    done
+    [[ -n "$python" ]] || { err "Python 3.9+ is required for image preflight and profile management"; return 1; }
+    "$python" "${SCRIPT_DIR}/scripts/profile-manager.py" "$@"
+}
+
+emit_profile() {
+    local value
+    for value in "$PROFILE" "$BASE_IMAGE" "$PI_VERSION" "${TOOL_SPECS[@]}" "${EXTENSION_SPECS[@]}" "${NPM_SPECS[@]}" "${MANIFEST_ENVS[@]}" "${MANIFEST_PATHS[@]}" "${MANIFEST_APT[@]}" "${MANIFEST_SHELL_COMMANDS[@]}"; do
+        [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || { err "Profile values must be single-line"; return 1; }
+    done
+    [[ -z "$PROFILE" ]] || printf 'PROFILE=%s\n' "$PROFILE"
+    printf 'BASE_IMAGE=%s\nPI_VERSION=%s\n' "$BASE_IMAGE" "$PI_VERSION"
+    local spec
+    for spec in "${TOOL_SPECS[@]}"; do printf 'TOOL=%s\n' "$spec"; done
+    for spec in "${EXTENSION_SPECS[@]}"; do printf 'EXTENSION=%s\n' "$spec"; done
+    for spec in "${NPM_SPECS[@]}"; do printf 'NPM=%s\n' "$spec"; done
+    for spec in "${MANIFEST_ENVS[@]}"; do printf 'ENV=%s\n' "$spec"; done
+    for spec in "${MANIFEST_PATHS[@]}"; do printf 'PATH=%s\n' "$spec"; done
+    for spec in "${MANIFEST_APT[@]}"; do printf 'APT=%s\n' "$spec"; done
+    for spec in "${MANIFEST_SHELL_COMMANDS[@]}"; do printf 'SHELL_COMMAND=%s\n' "$spec"; done
+}
+
 validate_npm_spec() {
     local spec="$1"
-    [[ "$spec" =~ ^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*(@[-^~A-Za-z0-9][-A-Za-z0-9._+~^]*)?$ ]] || {
-        err "Invalid npm package '$spec' (expected PACKAGE[@VERSION])"
+    [[ -n "$spec" && "$spec" != -* && "$spec" != *$'\n'* && "$spec" != *$'\r'* ]] || {
+        err "Invalid npm specification (expected PACKAGE[@VERSION])"
         return 1
     }
 }
@@ -159,7 +194,7 @@ write_default_config() {
 }
 
 load_config() {
-    [[ -f "$CONFIG_FILE" ]] || { write_default_config; return 0; }
+    [[ -f "$CONFIG_FILE" ]] || { (( DRY_RUN || READ_ONLY_CONFIG )) || write_default_config; return 0; }
     local line key value lineno=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         ((++lineno)); line="$(trim "$line")"
@@ -195,6 +230,10 @@ write_manifest() {
     fi
     [[ -r "$PROFILE_MANIFEST_TEMPLATE" ]] || { err "Profile manifest template not found: $PROFILE_MANIFEST_TEMPLATE"; exit 1; }
     mkdir -p "$PROFILES_DIR"
+    if [[ -e "$PROFILE_FILE" ]]; then
+        confirm "Replace existing profile '$PROFILE'? A backup will be created." || exit 1
+        cp -p "$PROFILE_FILE" "${PROFILE_FILE}.bak-$(date -u +%Y%m%d-%H%M%S)-$$"
+    fi
     {
         cat "$PROFILE_MANIFEST_TEMPLATE"
         echo
@@ -356,6 +395,12 @@ build_image() {
     echo "    base image:    $BASE_IMAGE"
     echo "    container ID:  ${CONTAINER_UID}:${CONTAINER_GID}"
     local build_args=(--tag "$IMAGE" --build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "PI_VERSION=${PI_VERSION}" --build-arg "USER_NAME=${CONTAINER_USER}" --build-arg "USER_UID=${CONTAINER_UID}" --build-arg "USER_GID=${CONTAINER_GID}" --file "$CONTAINERFILE")
+    build_args+=(--label "io.pi-sandbox.profile=${PROFILE:-default}" --label "io.pi-sandbox.pi-version=$PI_VERSION"
+        --label "io.pi-sandbox.tools=$(IFS=,; echo "${TOOL_SPECS[*]}")"
+        --label "io.pi-sandbox.npm=$(IFS=,; echo "${NPM_SPECS[*]}")"
+        --label "io.pi-sandbox.capabilities=gh,glab-device"
+        --label "io.pi-sandbox.template-version=2"
+        --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
     (( NO_CACHE )) && build_args+=(--no-cache)
     (( PULL )) && build_args+=(--pull=always)
     run_cmd podman build "${build_args[@]}" "$context"
@@ -376,17 +421,29 @@ for ((i=0; i<${#args[@]}; i++)); do
     if [[ "${args[i]}" == "--config" ]]; then
         (( i + 1 < ${#args[@]} )) || { err "--config requires FILE"; exit 2; }
         CONFIG_FILE="${args[i+1]}"
+        CONFIG_DIR="$(dirname "$CONFIG_FILE")"
+        PROFILES_DIR="${CONFIG_DIR}/profiles"
+        CONTAINERFILE_DIR="${CONFIG_DIR}/dockerfiles"
+        CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox"
     fi
+    [[ "${args[i]}" != --dry-run ]] || DRY_RUN=1
+    case "${args[i]}" in --check-updates|--upgrade|--validate|--info|--list-images) READ_ONLY_CONFIG=1 ;; esac
 done
 
 load_config
 
-if [[ $# -gt 0 && "$1" != -* ]]; then PROFILE="$1"; shift; fi
+if [[ $# -gt 0 && "$1" != -* ]]; then
+    PROFILE="$1"; shift
+    validate_profile_name
+    profile_manager validate --file "${PROFILES_DIR}/${PROFILE}.profile" >/dev/null
+    load_manifest
+fi
 
 while [[ $# -gt 0 ]]; do
+    case "$1" in --extension|--npm|--env|--path|--apt|--shell-command|--project-node) REGENERATE_CONTAINERFILE=1 ;; esac
     case "$1" in
         --create) [[ $# -ge 2 ]] || { err "$1 requires PROFILE"; exit 2; }; PROFILE="$2"; CREATE_PROFILE=1; shift ;;
-        --tool) [[ $# -ge 2 ]] || { err "$1 requires TOOL@VERSION"; exit 2; }; TOOL_SPECS+=("$2"); shift ;;
+        --tool) [[ $# -ge 2 ]] || { err "$1 requires TOOL@VERSION"; exit 2; }; updated_tools=(); for spec in "${TOOL_SPECS[@]}"; do [[ "${spec%%@*}" == "${2%%@*}" ]] || updated_tools+=("$spec"); done; TOOL_SPECS=("${updated_tools[@]}" "$2"); REGENERATE_CONTAINERFILE=1; shift ;;
         --extension) [[ $# -ge 2 ]] || { err "$1 requires TYPE:SPEC"; exit 2; }; EXTENSION_SPECS+=("$2"); shift ;;
         --npm) [[ $# -ge 2 ]] || { err "$1 requires PACKAGE[@VERSION]"; exit 2; }; validate_npm_spec "$2" || exit 2; NPM_SPECS+=("$2"); shift ;;
         --project-node) [[ $# -ge 2 ]] || { err "$1 requires VERSION"; exit 2; }; EXTENSION_SPECS+=("fnm:node@$2"); shift ;;
@@ -402,11 +459,16 @@ while [[ $# -gt 0 ]]; do
         --clean-image) CLEAN_IMAGE=1 ;;
         --pi-version) [[ $# -ge 2 ]] || { err "$1 requires VERSION"; exit 2; }; PI_VERSION="$2"; shift ;;
         --base-image) [[ $# -ge 2 ]] || { err "$1 requires IMAGE"; exit 2; }; BASE_IMAGE="$2"; shift ;;
-        --image) [[ $# -ge 2 ]] || { err "$1 requires IMAGE"; exit 2; }; IMAGE="$2"; shift ;;
+        --image) [[ $# -ge 2 ]] || { err "$1 requires IMAGE"; exit 2; }; IMAGE="$2"; CLI_IMAGE="$2"; shift ;;
         --container-user) [[ $# -ge 2 ]] || { err "$1 requires NAME"; exit 2; }; CONTAINER_USER="$2"; shift ;;
         --container-uid) [[ $# -ge 2 ]] || { err "$1 requires UID"; exit 2; }; CONTAINER_UID="$2"; shift ;;
         --container-gid) [[ $# -ge 2 ]] || { err "$1 requires GID"; exit 2; }; CONTAINER_GID="$2"; shift ;;
         --config) [[ $# -ge 2 ]] || { err "$1 requires FILE"; exit 2; }; CONFIG_FILE="$2"; shift ;;
+        --validate) VALIDATE_ONLY=1 ;;
+        --online) ONLINE=1 ;;
+        --check-updates) CHECK_UPDATES=1 ;;
+        --upgrade) UPGRADE_PROFILE=1 ;;
+        --patch-only) PATCH_ONLY=1 ;;
         --info) SHOW_INFO=1 ;;
         --list-images) LIST_IMAGES=1 ;;
         --dry-run) DRY_RUN=1 ;;
@@ -422,6 +484,23 @@ validate_profile_name
 [[ "$CONTAINER_UID" =~ ^[0-9]+$ ]] || { err "Container UID must be numeric"; exit 2; }
 [[ "$CONTAINER_GID" =~ ^[0-9]+$ ]] || { err "Container GID must be numeric"; exit 2; }
 
+if (( CHECK_UPDATES || UPGRADE_PROFILE )); then
+    [[ -n "$PROFILE_FILE" ]] || { err "Select an existing profile for version management"; exit 2; }
+    manager_args=(audit --file "$PROFILE_FILE")
+    (( UPGRADE_PROFILE )) && manager_args[0]=upgrade
+    (( PATCH_ONLY )) && manager_args+=(--patch-only)
+    (( YES )) && manager_args+=(--yes)
+    (( DRY_RUN )) && manager_args+=(--dry-run)
+    profile_manager "${manager_args[@]}"
+    exit $?
+fi
+if (( ! LIST_IMAGES && ! CLEAN_IMAGE )); then
+    manager_args=(validate --file -)
+    (( ONLINE )) && manager_args+=(--online)
+    emit_profile | profile_manager "${manager_args[@]}" >/dev/null
+fi
+if (( VALIDATE_ONLY )); then log "Profile validation passed"; exit 0; fi
+
 if (( CREATE_PROFILE )); then
     [[ -n "$PROFILE" ]] || { err "--create requires a profile"; exit 2; }
     ((${#TOOL_SPECS[@]})) || { err "Profile creation requires at least one --tool TOOL@VERSION"; exit 2; }
@@ -429,11 +508,10 @@ if (( CREATE_PROFILE )); then
     for spec in "${EXTENSION_SPECS[@]}"; do case "$spec" in uv:*|cargo:*|rustup:*|fnm:node@?*) ;; *) err "Unsupported extension '$spec'"; exit 2;; esac; done
     for spec in "${NPM_SPECS[@]}"; do validate_npm_spec "$spec" || exit 2; done
     IMAGE="pi-sandbox-${PROFILE}:latest"
+    [[ -z "$CLI_IMAGE" ]] || IMAGE="$CLI_IMAGE"
     CONTAINERFILE="${CONTAINERFILE_DIR}/Containerfile.pi-sandbox.${PROFILE}"
     write_manifest
     REGENERATE_CONTAINERFILE=1; UPDATE=1
-elif [[ -n "$PROFILE" ]]; then
-    load_manifest
 fi
 
 if (( SHOW_INFO )); then
@@ -473,6 +551,13 @@ if (( CLEAN_IMAGE )); then
     exit 0
 fi
 
+if (( BUILD || UPDATE )) && (( ! REGENERATE_CONTAINERFILE )) && [[ -f "$CONTAINERFILE" ]] && {
+    ! grep -Fq "# pi-sandbox template revision: 2" "$CONTAINERFILE" ||
+    [[ "$CONTAINERFILE_TEMPLATE" -nt "$CONTAINERFILE" || "$SNIPPET_TEMPLATE" -nt "$CONTAINERFILE" ]] ||
+    [[ -n "$PROFILE_FILE" && "$PROFILE_FILE" -nt "$CONTAINERFILE" ]]
+}; then
+    err "Saved Containerfile is stale; rerun with --regenerate-containerfile --update"; exit 2
+fi
 if (( REGENERATE_CONTAINERFILE )) || [[ ! -f "$CONTAINERFILE" ]]; then
     write_containerfile
 fi
@@ -482,6 +567,7 @@ if (( UPDATE )); then
 elif (( BUILD )); then
     if (( DRY_RUN )); then
         echo "# Build image only if missing: $IMAGE"
+        build_image
     elif ! image_exists; then
         build_image
     else

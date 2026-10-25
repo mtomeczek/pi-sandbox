@@ -13,6 +13,10 @@ graphify-out/
 /findings.md
 /task_plan.md
 
+# Python test/management bytecode
+__pycache__/
+*.py[cod]
+
 # Logs and temporary files
 *.log
 *.tmp
