@@ -92,7 +92,7 @@ class ProfileManagerTests(unittest.TestCase):
         calls = []
         def run(command, **kwargs):
             calls.append(command)
-            data = '{"host":{"security":{"rootless":true}}}' if command[1] == "info" else '[{"Config":{"Labels":{"io.pi-sandbox.template-version":"2","io.pi-sandbox.capabilities":"glab-device"}}}]'
+            data = '{"host":{"security":{"rootless":true}}}' if command[1] == "info" else '[{"Config":{"Labels":{"io.pi-sandbox.template-version":"3","io.pi-sandbox.capabilities":"glab-device"}}}]'
             return subprocess.CompletedProcess(command, 1 if command[1] == "secret" else 0, data, "private-error")
         args = argparse.Namespace(image="test", secret=["token-reference"], port=[])
         output = io.StringIO()

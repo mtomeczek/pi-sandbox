@@ -12,7 +12,7 @@ cat > "$WORK/bin/podman" <<'EOF'
 printf '%s\n' "$*" >> "$PODMAN_LOG"
 case "$1 $2" in
   'info --format') echo '{"host":{"security":{"rootless":true}}}' ;;
-  'image inspect') echo '[{"Config":{"Labels":{"io.pi-sandbox.template-version":"2","io.pi-sandbox.capabilities":"gh,glab-device"}}}]' ;;
+  'image inspect') echo '[{"Config":{"Labels":{"io.pi-sandbox.template-version":"3","io.pi-sandbox.capabilities":"gh,glab-device"}}}]' ;;
   'run '*) if [[ "${FAIL_BOOTSTRAP:-0}" == 1 && "$*" == *'pi install -l'* ]]; then exit 9; fi ;;
 esac
 exit 0

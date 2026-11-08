@@ -48,9 +48,15 @@ ENV PATH="${FNM_DIR}:${PATH}"
 @@ playwright
 # Install the Playwright CLI, all bundled browsers and their Debian dependencies,
 # plus the Playwright MCP server while this stage still runs as root.
-RUN npm install --global "playwright@{{VERSION}}" "@playwright/mcp@0.0.83" && \
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pi/browsers
+RUN export PATH="/opt/pi/node/bin:/opt/pi/tools/bin:$PATH" NPM_CONFIG_PREFIX=/opt/pi/tools; \
+    npm install --global "playwright@{{VERSION}}" "@playwright/mcp@0.0.84" && \
     playwright install --with-deps chromium firefox webkit && \
+    mcp_manifest="$(node -p 'require.resolve("playwright/package.json", { paths: ["/opt/pi/tools/lib/node_modules/@playwright/mcp"] })')" && \
+    node "${mcp_manifest%/package.json}/cli.js" install --with-deps chromium firefox webkit && \
+    /usr/local/lib/pi-sandbox/wrap-node-tools.sh /opt/pi/tools && \
     npm cache clean --force
+ENV PATH="/opt/pi/tools/node-bin:/opt/pi/tools/bin:${PATH}"
 @@ caddy
 # Caddy is installed in the user's XDG bin directory.
 RUN arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=amd64;; arm64) a=arm64;; *) exit 1;; esac; \
@@ -67,9 +73,11 @@ RUN {{COMMAND}}
 @@ npm-prefix
 # Profile-defined npm command-line packages use a user-writable global prefix.
 ENV NPM_CONFIG_PREFIX="${XDG_DATA_HOME}/npm"
-ENV PATH="${NPM_CONFIG_PREFIX}/bin:${PATH}"
+ENV PATH="${NPM_CONFIG_PREFIX}/node-bin:${NPM_CONFIG_PREFIX}/bin:${PATH}"
 @@ npm-package
-RUN npm install --global "{{PACKAGE}}"
+RUN npm install --global "{{PACKAGE}}" && \
+    /usr/local/lib/pi-sandbox/wrap-node-tools.sh "${NPM_CONFIG_PREFIX}" && \
+    npm cache clean --force
 @@ extension-uv
 RUN uv tool install "{{PACKAGE}}"
 @@ extension-cargo

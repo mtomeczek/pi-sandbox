@@ -7,7 +7,7 @@ These features are available in the Bash and PowerShell creators and runners. On
 ```bash
 pi-sandbox-create golang --validate
 pi-sandbox-create golang --validate --online
-pi-sandbox-create golang --tool go@1.27.3 --pi-version 1.4.0 --update --dry-run
+pi-sandbox-create golang --tool go@1.27.3 --pi-version 1.5.0 --update --dry-run
 pi-sandbox-create golang --regenerate-containerfile --update
 ```
 
@@ -23,7 +23,19 @@ Replacing an existing manifest with `--create` requires confirmation (`--yes` fo
 
 A cached Containerfile without the current revision marker, or older than its profile, template, or snippets, is rejected before a build, with instructions to use `--regenerate-containerfile --update`.
 
-Images carry profile, Pi, tool and npm package version, template revision, capability, and build-time labels. Archive downloads for Go, the JDK, Caddy, and glab are checked against upstream checksums (SHA-256 or SHA-512, depending on the release). Go hashes come from the official release JSON metadata. Rustup, uv, and fnm still use upstream installers; these external dependencies prevent a guarantee of fully reproducible builds. Playwright MCP uses the independently specified version `0.0.83`; browser versions correspond to the selected Playwright release.
+Images carry profile, Pi, tool and npm package version, template revision, capability, and build-time labels. Archive downloads for Go, the JDK, Caddy, gh, and glab are checked against upstream checksums (SHA-256 or SHA-512, depending on the release). Go hashes come from the official release JSON metadata. Rustup, uv, and fnm still use upstream installers; these external dependencies prevent a guarantee of fully reproducible builds. Playwright MCP uses the independently specified version `0.0.84`. The CLI and MCP server can depend on different Playwright releases, so builds install both sets of browser revisions under `/opt/pi/browsers`, where the unprivileged runtime user can access them.
+
+## Pi installation and private Node.js
+
+Both creators build Linux images and run the official `https://pi.dev/install.sh` installer inside the image, not on the host. See the [official quickstart](https://pi.dev/docs/latest/quickstart) for native host installation, including the PowerShell installer. Host Node.js is not required.
+
+The default runtime base is `debian:bookworm-slim`. A separate `node:24.22.2-bookworm-slim` build stage supplies Node.js and npm under `/opt/pi/node`; it is not the runtime base image. Pi is installed as the unprivileged runtime user under `/opt/pi/agent`, so mounting `~/.pi/agent` for sessions and credentials does not hide the executable. Pi's launcher selects its private interpreter explicitly and leaves project `PATH` unchanged. FNM can therefore select older project Node.js versions without changing Pi's runtime. No system-wide `node` command is installed by these templates.
+
+`PI_VERSION` still accepts a fixed version or npm distribution tag. The build resolves the selection, downloads its official managed-release manifests, and passes them unchanged to the official installer through a temporary loopback-only release snapshot. This is necessary because the installer otherwise selects the latest release. The snapshot server and temporary files are removed after installation. An unavailable managed-release manifest aborts the build instead of silently installing a different version; releases that lack official managed artifacts cannot be installed this way.
+
+The `npm` and `npx` launchers also select the private runtime when no project-specific executable takes precedence. Profile npm tools and Playwright receive separate private-Node launchers; npm's package links remain intact. This does not install a project Node.js version. Use `fnm` when project scripts need a `node` command. Build contexts contain only the repository's image helper scripts, never the workspace, profiles, or credentials.
+
+Existing explicit `BASE_IMAGE=node:...` settings are not rewritten automatically and still include Node.js from that custom base. Change `BASE_IMAGE` in both the relevant saved configuration and profile to `debian:bookworm-slim` before regenerating and rebuilding. CLI overrides apply only to the current invocation. To upgrade a reproducible image, update its profile and rebuild rather than relying on `pi update` inside an ephemeral container. The private Node source image is controlled by `PI_NODE_IMAGE` in the shared Containerfile template; its version tag is not a digest pin, and the upstream installer remains mutable.
 
 ## Audit and upgrade a saved profile
 

@@ -9,6 +9,7 @@ POWERSHELL_CREATOR="${ROOT_DIR}/scripts/windows/pi-sandbox-create.ps1"
 minimum_version="$(awk -F'`' '/^Minimum supported Podman version:/{print $2; exit}' "$POLICY_FILE")"
 pi_version="$(awk -F'"' '/^PI_VERSION=/{print $2; exit}' "$BASH_CREATOR")"
 base_image="$(awk -F'"' '/^BASE_IMAGE=/{print $2; exit}' "$BASH_CREATOR")"
+private_node_image="$(awk -F= '/^ARG PI_NODE_IMAGE=/{print $2; exit}' "${ROOT_DIR}/templates/Containerfile.pi-sandbox.template")"
 
 [[ "$minimum_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
 	printf 'Invalid minimum Podman version in %s: %s\n' "$POLICY_FILE" "$minimum_version" >&2
@@ -20,6 +21,7 @@ base_image="$(awk -F'"' '/^BASE_IMAGE=/{print $2; exit}' "$BASH_CREATOR")"
 }
 grep -Fq "Default Pi version: \`${pi_version}\`" "$POLICY_FILE"
 grep -Fq "Default base image: \`${base_image}\`" "$POLICY_FILE"
+grep -Fq "Private Node.js source image: \`${private_node_image}\`" "$POLICY_FILE"
 grep -Fq "\$PiVersion = '${pi_version}'" "$POWERSHELL_CREATOR"
 grep -Fq "\$BaseImage = '${base_image}'" "$POWERSHELL_CREATOR"
 

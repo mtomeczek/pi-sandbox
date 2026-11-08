@@ -19,7 +19,7 @@ $ConfigTemplate = Join-Path $ScriptDir 'templates\create.config.template'
 $ProfileTemplate = Join-Path $ScriptDir 'templates\profile.template'
 $HelpFile = Join-Path $ScriptDir 'docs\pi-sandbox-create.windows.md'
 
-$Image = 'pi-sandbox:latest'; $BaseImage = 'node:24-bookworm-slim'; $PiVersion = '1.4.0'
+$Image = 'pi-sandbox:latest'; $BaseImage = 'debian:bookworm-slim'; $PiVersion = '1.5.0'
 $ContainerUser = 'pi'; $ContainerUid = '1000'; $ContainerGid = '1000'; $VerboseMode = $false
 $ProfileName = ''; $ProfileFile = ''; $Containerfile = Join-Path $ContainerfileDir 'Containerfile.pi-sandbox'
 $CreateProfile = $false; $Build = $false; $Update = $false; $NoCache = $false; $Pull = $false; $Regenerate = $false; $DryRun = $false; $ShowInfo = $false; $ListImages = $false; $CleanImage = $false; $Yes = $false
@@ -511,7 +511,7 @@ if ($CleanImage) {
 }
 if (($Build -or $Update) -and -not $Regenerate -and (Test-Path -LiteralPath $Containerfile)) {
     $generatedTime = (Get-Item -LiteralPath $Containerfile).LastWriteTimeUtc
-    $stale = -not ([IO.File]::ReadAllText($Containerfile).Contains('# pi-sandbox template revision: 2'))
+    $stale = -not ([IO.File]::ReadAllText($Containerfile).Contains('# pi-sandbox template revision: 3'))
     foreach ($source in @($ContainerfileTemplate, $SnippetTemplate, $ProfileFile)) {
         if ($source -and (Test-Path -LiteralPath $source) -and (Get-Item -LiteralPath $source).LastWriteTimeUtc -gt $generatedTime) { $stale = $true }
     }
@@ -527,11 +527,13 @@ if ($Update -or $Build) {
             $buildArgs.Add('--no-cache')
         }; if ($Pull) {
             $buildArgs.Add('--pull=always')
-        }; $buildArgs.AddRange([string[]]@('--label', "io.pi-sandbox.profile=$(if($ProfileName){$ProfileName}else{'default'})", '--label', "io.pi-sandbox.pi-version=$PiVersion", '--label', "io.pi-sandbox.tools=$($ToolSpecs -join ',')", '--label', "io.pi-sandbox.npm=$($NpmSpecs -join ',')", '--label', 'io.pi-sandbox.capabilities=gh,glab-device', '--label', 'io.pi-sandbox.template-version=2', '--label', "org.opencontainers.image.created=$([DateTime]::UtcNow.ToString('o'))")); $context = Join-Path ([IO.Path]::GetTempPath()) ('pi-sandbox-build-' + [guid]::NewGuid()); $buildArgs.Add($context)
+        }; $buildArgs.AddRange([string[]]@('--label', "io.pi-sandbox.profile=$(if($ProfileName){$ProfileName}else{'default'})", '--label', "io.pi-sandbox.pi-version=$PiVersion", '--label', "io.pi-sandbox.tools=$($ToolSpecs -join ',')", '--label', "io.pi-sandbox.npm=$($NpmSpecs -join ',')", '--label', 'io.pi-sandbox.capabilities=gh,glab-device', '--label', 'io.pi-sandbox.template-version=3', '--label', "org.opencontainers.image.created=$([DateTime]::UtcNow.ToString('o'))")); $context = Join-Path ([IO.Path]::GetTempPath()) ('pi-sandbox-build-' + [guid]::NewGuid()); $buildArgs.Add($context)
         try {
             if ($DryRun -or $VerboseMode) { Show-Command (@('podman') + $buildArgs.ToArray()) }
             if (-not $DryRun) {
-                [IO.Directory]::CreateDirectory($context) | Out-Null
+                $helpers = Join-Path $context 'pi-sandbox'
+                [IO.Directory]::CreateDirectory($helpers) | Out-Null
+                Copy-Item -Path (Join-Path $ScriptDir 'scripts/image/*') -Destination $helpers
                 & podman @buildArgs
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }

@@ -18,25 +18,28 @@ The commands deliberately require rootless Podman and working subordinate UID an
 
 The canonical defaults must stay identical in the Bash and PowerShell creators:
 
-- Default Pi version: `1.4.0`
-- Default base image: `node:24-bookworm-slim`
+- Default Pi version: `1.5.0`
+- Default base image: `debian:bookworm-slim`
+- Private Node.js source image: `node:24.22.2-bookworm-slim` (separate build stage, copied under `/opt/pi/node`)
+- GitHub CLI: `2.103.3`; GitLab CLI: `1.128.0` (checksum-verified upstream archives)
+- Playwright MCP: `0.0.84`
 - Default image name: `pi-sandbox:latest`
 
 `tests/release-policy.sh` checks these cross-platform defaults and verifies that a supplied Podman version meets the declared minimum.
 
 ## Release procedure
 
-1. Choose the Pi npm release and compatible Node base image.
+1. Choose a Pi release with official managed-install manifests, a compatible private Node.js source image, and a runtime base image.
 2. Update both creator implementations and this document in one change.
 3. Regenerate a representative Containerfile and run the regression suite.
-4. Build a minimal profile with the oldest supported Podman version, then start it and confirm that Pi launches with the Node.js runtime supplied by the image.
+4. Build a minimal profile with the oldest supported Podman version, then start it and confirm that Pi launches with the private Node.js runtime supplied by the image, with no system-wide `node` command.
 5. Repeat the relevant host validation for Linux, macOS, and Windows before publishing a release.
 6. Record the validated Podman versions and the Pi and base-image changes in the release notes.
 
 ## Version updates
 
 - **Pi patch or minor version:** update the pinned default only after a representative image build and Pi startup test pass.
-- **Pi major or Node base-image change:** additionally rebuild profiles using FNM, Rust, Python, and JVM tooling, because generated snippets and PATH initialization may be affected.
+- **Pi major, private Node.js source, or runtime base-image change:** additionally rebuild profiles using FNM, Rust, Python, and JVM tooling, because generated snippets and PATH initialization may be affected.
 - **Podman major version:** add it to the support matrix only after rootless mounts, volumes, network disabling, and state reset behavior are exercised on each applicable host.
 
 Users may override the Pi version and base image for individual profiles, but those overrides do not expand the project's support matrix.

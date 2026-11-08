@@ -2,7 +2,9 @@
 
 Create and run isolated Pi coding-agent sandboxes with rootless Podman.
 
-Every image includes GitHub CLI (`gh`) and GitLab CLI (`glab` v1.124.0) with device login support. To update these tools in an existing image, regenerate its Containerfile and rebuild it: `pi-sandbox-create golang --regenerate-containerfile --update`.
+Pi is installed with the [official installer](https://pi.dev/docs/latest/quickstart), using a private Node.js runtime under `/opt/pi/node`. The default Debian image does not expose a system-wide `node` command. Project Node.js versions remain independent under `fnm`.
+
+Every image includes GitHub CLI (`gh` v2.103.3) and GitLab CLI (`glab` v1.128.0) with device login support. To update these tools in an existing image, regenerate its Containerfile and rebuild it: `pi-sandbox-create golang --regenerate-containerfile --update`.
 
 The project is split into two roles:
 
@@ -83,7 +85,7 @@ See [macOS documentation](docs/pi-sandbox-macos.md) for configuration and valida
 Create an image with Windows Podman:
 
 ```powershell
-.\pi-sandbox-create.ps1 --create node-legacy --tool fnm@1.39.0 --extension fnm:node@14
+.\pi-sandbox-create.ps1 --create node-project --tool fnm@1.39.0 --extension fnm:node@24
 ```
 
 The Windows creator and runner share `%APPDATA%\pi-sandbox` (or `%USERPROFILE%\AppData\Roaming\pi-sandbox` when `%APPDATA%` is unavailable). See [Windows creator documentation](docs/pi-sandbox-create.windows.md).
@@ -163,18 +165,20 @@ Show the resolved build configuration:
 
 ## Project Node runtime
 
-Pi uses the Node.js runtime supplied by the base image. To use a separate Node.js version for project commands, add FNM and specify the project runtime version when creating a profile:
+Pi uses its private Node.js runtime, independently of project Node.js versions. To use a separate Node.js version for project commands, add FNM and specify the project runtime version when creating a profile:
 
 ```bash
-./pi-sandbox-create --create legacy \
-  --base-image node:24-bookworm-slim \
+./pi-sandbox-create --create node-project \
+  --base-image debian:bookworm-slim \
   --tool fnm@1.39.0 \
-  --extension fnm:node@14 \
-  --extension fnm:node@25 \
+  --extension fnm:node@22 \
+  --extension fnm:node@24 \
   --env FNM_VERSION_FILE_STRATEGY=recursive
 ```
 
-The generated profile uses repeatable `EXTENSION=fnm:node@VERSION` directives. The base image supplies Pi's only runtime: `/usr/local/bin/pi` is always executed with `/usr/local/bin/node`. FNM project versions are installed only below `/home/pi/.local/share/fnm/node-versions/`. At startup, the entrypoint initializes FNM and asks it to use the workspace version file; `FNM_VERSION_FILE_STRATEGY=recursive` lets FNM find `.node-version` or `.nvmrc` in a parent directory. This changes the environment inherited by project commands without changing Pi's interpreter.
+The generated profile uses repeatable `EXTENSION=fnm:node@VERSION` directives. Pi's launcher always selects `/opt/pi/node/bin/node`, while the managed Pi installation lives under `/opt/pi/agent`, outside the mounted state directory. The private Node.js runtime is not added to the normal `PATH`. FNM project versions are installed only below `/home/pi/.local/share/fnm/node-versions/`. At startup, the entrypoint initializes FNM and asks it to use the workspace version file; `FNM_VERSION_FILE_STRATEGY=recursive` lets FNM find `.node-version` or `.nvmrc` in a parent directory. This changes the environment inherited by project commands without changing Pi's interpreter.
+
+Existing configurations and profiles retain their explicit base image. To remove the old system-wide Node.js runtime, change their `BASE_IMAGE` to `debian:bookworm-slim`, then run `pi-sandbox-create PROFILE --regenerate-containerfile --update`. See [Pi installation details](docs/sandbox-management.md#pi-installation-and-private-nodejs) for version pins and npm tool compatibility.
 
 ## Runner usage
 

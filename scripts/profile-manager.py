@@ -4,7 +4,6 @@ import argparse
 import datetime
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import socket
@@ -13,6 +12,7 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 TOOLS = {"go", "rust", "jvm", "uv", "fnm", "python", "caddy", "playwright"}
 KEYS = {"PROFILE", "BASE_IMAGE", "PI_VERSION", "TOOL", "EXTENSION", "PROJECT_NODE", "NPM", "ENV", "ENV_SECRET", "PATH", "APT", "SHELL_COMMAND"}
@@ -325,7 +325,7 @@ def doctor(args):
         metadata = check("image metadata", ["podman", "image", "inspect", args.image])
         try:
             labels = json.loads(metadata.stdout)[0].get("Config", {}).get("Labels", {}) if metadata else {}
-            if labels.get("io.pi-sandbox.template-version") != "2":
+            if labels.get("io.pi-sandbox.template-version") != "3":
                 print("WARN: old/unlabelled image; regenerate Containerfile and rebuild for verified CLI capabilities")
             elif "glab-device" not in labels.get("io.pi-sandbox.capabilities", ""):
                 print("WARN: device-login capability not recorded; regenerate Containerfile and rebuild")

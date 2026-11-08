@@ -35,11 +35,13 @@ jobs:
             pi-sandbox-run \
             pi-sandbox-setup \
             tests/*.sh
+          shellcheck --severity=warning scripts/image/*.sh
       - name: Test profile management and Bash improvements
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           python3 -B tests/test_profile_manager.py
+          python3 -B tests/test_private_node.py
           bash tests/improvements.sh
           bash tests/standard-image.sh
           bash tests/profile-secrets.sh
@@ -71,6 +73,8 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           python -B tests/test_profile_manager.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B tests/test_private_node.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/improvements.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

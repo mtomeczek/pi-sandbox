@@ -2,7 +2,7 @@
 
 Create and build Pi sandbox images. This command is intended for administrators and users who manage images and profiles.
 
-All images include GitHub CLI (`gh`) from Debian and GitLab CLI (`glab`) v1.124.0 for amd64 and arm64. The glab archive is verified against the release's SHA-256 checksum. Builds verify that `glab auth login` supports `--device`. For existing images, use `pi-sandbox-create PROFILE --regenerate-containerfile --update` to apply the updated standard tools. Authenticate using host `--env` options or profile `ENV_SECRET` references; credentials are not included in the image.
+All images include GitHub CLI (`gh`) v2.103.3 and GitLab CLI (`glab`) v1.128.0 for amd64 and arm64. Both archives are verified against their releases' SHA-256 checksums. Builds verify that `glab auth login` supports `--device`. For existing images, use `pi-sandbox-create PROFILE --regenerate-containerfile --update` to apply the updated standard tools. Authenticate using host `--env` options or profile `ENV_SECRET` references; credentials are not included in the image.
 
 ## Validation and version management
 
@@ -29,7 +29,7 @@ pi-sandbox-create PROFILE --build [OPTIONS]
 
 ```bash
 pi-sandbox-create --build
-pi-sandbox-create --create node-legacy --tool fnm@1.39.0 --extension fnm:node@14 --extension fnm:node@25 --env FNM_VERSION_FILE_STRATEGY=recursive
+pi-sandbox-create --create node-project --tool fnm@1.39.0 --extension fnm:node@22 --extension fnm:node@24 --env FNM_VERSION_FILE_STRATEGY=recursive
 pi-sandbox-create rust --build --pull
 pi-sandbox-create rust --regenerate-containerfile --no-cache
 pi-sandbox-create --list-images
@@ -52,7 +52,7 @@ pi-sandbox-create --list-images
 - `--update` — rebuild the selected image.
 - `--regenerate-containerfile` — regenerate the Containerfile.
 - `--no-cache` — disable the Podman build cache; implies `--update`.
-- `--pull` — pull a newer base image; implies `--update`.
+- `--pull` — pull newer build-stage images, including the runtime base and private Node.js source; implies `--update`.
 - `--clean-image` — remove the selected sandbox image.
 - `--list-images` — list locally available images carrying the `pi-sandbox` tag (repository, tag, ID, age, size) without building or changing them.
 
@@ -60,12 +60,14 @@ Images built or reused by the creator receive an additional `REPOSITORY:pi-sandb
 
 ## Image settings
 
-- `--pi-version VERSION` — Pi npm package version or distribution tag.
-- `--base-image IMAGE` — select the base image.
+- `--pi-version VERSION` — Pi version or npm distribution tag, installed using its official managed-release manifests.
+- `--base-image IMAGE` — select the runtime base image (default: `debian:bookworm-slim`); Pi's private Node.js runtime comes from a separate build stage.
 - `--image IMAGE` — override the image name.
 - `--container-user NAME` — runtime user name.
 - `--container-uid UID` — runtime user UID.
 - `--container-gid GID` — runtime user GID.
+
+Pi is installed with the official Linux installer under `/opt/pi/agent` and launched with `/opt/pi/node/bin/node`, without adding Node.js to the normal `PATH`. Project Node.js versions remain independent under fnm. Existing configurations and profiles that explicitly use a Node base must change `BASE_IMAGE` to `debian:bookworm-slim` to remove system-wide Node.js, then regenerate and rebuild. See [Pi installation details](sandbox-management.md#pi-installation-and-private-nodejs).
 
 ## Setup
 

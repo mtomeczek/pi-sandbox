@@ -12,7 +12,7 @@ This report describes the shell entry points and their main execution paths. The
 | `pi-sandbox-create.ps1` | PowerShell 7 | `scripts/windows/pi-sandbox-create.ps1` | Public forwarding wrapper for the Windows creator. | User or PowerShell |
 | `pi-sandbox-run.ps1` | PowerShell 7 | `scripts/windows/pi-sandbox-run.ps1` | Public forwarding wrapper for the Windows runner. | User or PowerShell |
 
-The PowerShell wrappers set strict mode, stop on errors, set UTF-8 console output, and invoke their private implementation once with `@args`. They declare no functions of their own.
+The PowerShell wrappers set strict mode, stop on errors, set UTF-8 console output, and invoke their private implementation once with `@args`. They declare no functions of their own. The creator wrapper also propagates its implementation's exit status so a failed native build cannot be reported as successful.
 
 ## 2. End-to-end steps
 
@@ -26,7 +26,9 @@ The PowerShell wrappers set strict mode, stop on errors, set UTF-8 console outpu
 6. Complete validation, inspection, version-audit, or profile-upgrade actions without starting an image build.
 7. Verify Podman availability for image actions. List images or remove the selected image after confirmation, as requested.
 8. Generate a Containerfile when requested, missing, or required by command-line changes. Reject a stale cached Containerfile before building and explain how to regenerate it.
-9. Rebuild for `--update`, or build a missing image for `--build`. Add component labels and the management tag after a successful build.
+9. Rebuild for `--update`, or build a missing image for `--build`, using an isolated context containing only `scripts/image/` helpers. Add component labels and the management tag after a successful build.
+
+The shared Containerfile uses a Debian runtime base and copies a private Node.js runtime from a separate build stage. Image helpers run the official Pi installer against the selected release's locked manifests, keep Pi binaries outside the state volume, and provide launchers that do not change Pi's inherited project `PATH`. See [Pi installation details](sandbox-management.md#pi-installation-and-private-nodejs).
 
 ### Runner flow (Bash and Windows)
 

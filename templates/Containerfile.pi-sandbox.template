@@ -1,18 +1,39 @@
-# pi-sandbox template revision: 2
-ARG BASE_IMAGE=node:24-bookworm-slim
+# pi-sandbox template revision: 3
+ARG BASE_IMAGE=debian:bookworm-slim
+ARG PI_NODE_IMAGE=node:24.22.2-bookworm-slim
+FROM ${PI_NODE_IMAGE} AS pi-node
 FROM ${BASE_IMAGE} AS runtime
 ARG PI_VERSION
-ARG GLAB_VERSION=1.124.0
+ARG GH_VERSION=2.103.3
+ARG GLAB_VERSION=1.128.0
 ARG USER_NAME=pi
 ARG USER_UID=1000
 ARG USER_GID=1000
+COPY --from=pi-node /usr/local/bin/node /opt/pi/node/bin/node
+COPY --from=pi-node /usr/local/lib/node_modules/npm/ /opt/pi/node/lib/node_modules/npm/
+COPY pi-sandbox/ /usr/local/lib/pi-sandbox/
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates git gh curl jq ripgrep fd-find fzf less procps openssh-client unzip xz-utils tar \
+      bash ca-certificates libatomic1 libstdc++6 git curl jq ripgrep fd-find fzf less procps openssh-client unzip xz-utils tar \
 {{APT_PACKAGES}}
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
-    && gh --version \
     && rm -rf /var/lib/apt/lists/*
+# Install a current, pinned GitHub CLI instead of Debian's older package.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64|arm64) ;; *) echo "Unsupported gh architecture: $arch" >&2; exit 1;; esac; \
+    work="$(mktemp -d)"; cd "$work"; \
+    asset="gh_${GH_VERSION}_linux_${arch}.tar.gz"; \
+    release="https://github.com/cli/cli/releases/download/v${GH_VERSION}"; \
+    curl -fsSLo "$asset" "$release/$asset"; \
+    curl -fsSLo checksums.txt "$release/gh_${GH_VERSION}_checksums.txt"; \
+    awk -v asset="$asset" '$2 == asset { print }' checksums.txt > selected-checksum.txt; \
+    test -s selected-checksum.txt; \
+    sha256sum -c selected-checksum.txt; \
+    tar -xzf "$asset" --strip-components=1 "gh_${GH_VERSION}_linux_${arch}/bin/gh"; \
+    install -m 0755 bin/gh /usr/local/bin/gh; \
+    cd /; rm -rf "$work"; \
+    gh --version
 # Debian's glab package is too old for OAuth device login. Install upstream.
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
@@ -30,12 +51,12 @@ RUN set -eux; \
     cd /; rm -rf "$work"; \
     glab --version; \
     glab auth login --help | grep -q -- '--device'
-# PI_VERSION may be an exact version or an npm dist-tag such as "latest".
-# Install Pi directly in the final runtime stage so npm preserves its package layout.
-RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
-    && npm cache clean --force \
-    && command -v pi \
-    && pi --version
+# Only Pi/tool launchers can select the private runtime; node is not on PATH.
+RUN chmod 0755 /usr/local/lib/pi-sandbox/*.sh \
+    && ln -s ../lib/node_modules/npm/bin/npm-cli.js /opt/pi/node/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /opt/pi/node/bin/npx \
+    && ln -sf ../lib/pi-sandbox/npm.sh /usr/local/bin/npm \
+    && ln -sf ../lib/pi-sandbox/npm.sh /usr/local/bin/npx
 {{ROOT_DYNAMIC_SNIPPETS}}
 
 # Create the unprivileged runtime user before installing language/tool managers.
@@ -49,15 +70,17 @@ RUN set -eux; \
     elif [ -z "$existing_user" ]; then \
       useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --home-dir "/home/${USER_NAME}" --shell /bin/bash "${USER_NAME}"; \
     fi; \
-    mkdir -p "/home/${USER_NAME}/workspace" \
+    mkdir -p /opt/pi/agent \
+             "/home/${USER_NAME}/workspace" \
              "/home/${USER_NAME}/.pi/agent" \
              "/home/${USER_NAME}/.local/bin" \
              "/home/${USER_NAME}/.local/share" \
              "/home/${USER_NAME}/.config" \
              "/home/${USER_NAME}/.cache"; \
-    chown -R "${USER_UID}:${USER_GID}" "/home/${USER_NAME}"
+    chown -R "${USER_UID}:${USER_GID}" "/home/${USER_NAME}" /opt/pi/agent
 
-ENV HOME=/home/${USER_NAME} \
+ENV PI_SANDBOX_AGENT_DIR=/opt/pi/agent \
+    HOME=/home/${USER_NAME} \
     XDG_CONFIG_HOME=/home/${USER_NAME}/.config \
     XDG_DATA_HOME=/home/${USER_NAME}/.local/share \
     XDG_CACHE_HOME=/home/${USER_NAME}/.cache \
@@ -65,25 +88,26 @@ ENV HOME=/home/${USER_NAME} \
     XDG_BIN_HOME=/home/${USER_NAME}/.local/bin
 ENV PATH="/home/${USER_NAME}/.local/bin:${PATH}"
 USER ${USER_UID}:${USER_GID}
+# Keep managed Pi binaries outside the mounted ~/.pi/agent state directory.
+RUN /usr/local/lib/pi-sandbox/install-pi.sh
 {{DYNAMIC_SNIPPETS}}
 
 # Dynamic snippets install user-owned toolchains. Switch back to root only to
 # install the global entrypoint used by Podman at container start.
 USER root
-# Pi always uses the base image's binaries. FNM only changes the environment
-# inherited by Pi's project commands.
+# Pi's launcher pins its interpreter without changing project-command PATH.
 RUN set -eux; \
-    test -x /usr/local/bin/node; \
+    test -x /opt/pi/node/bin/node; \
+    ln -sf ../lib/pi-sandbox/pi.sh /usr/local/bin/pi; \
     test -x /usr/local/bin/pi; \
-    pi_cli="$(readlink -f /usr/local/bin/pi)"; \
     printf '%s\n' \
       '#!/bin/bash' \
       'set -euo pipefail' \
       'if command -v fnm >/dev/null 2>&1; then' \
       '  eval "$(fnm env --shell bash)"' \
-      '  fnm use --silent || true' \
+      '  fnm use >/dev/null || true' \
       'fi' \
-      "exec \"/usr/local/bin/node\" \"${pi_cli}\" \"\$@\"" \
+      'exec /usr/local/bin/pi "$@"' \
       > /usr/local/bin/pi-sandbox-entrypoint; \
     chmod 0755 /usr/local/bin/pi-sandbox-entrypoint
 USER ${USER_UID}:${USER_GID}

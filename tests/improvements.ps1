@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $work = Join-Path ([IO.Path]::GetTempPath()) ('sandbox-improvements-' + [guid]::NewGuid())
-$oldPath = $env:PATH; $oldLog = $env:PODMAN_LOG
+$oldPath = $env:PATH; $oldLog = $env:PODMAN_LOG; $oldBuildFailure = $env:PODMAN_BUILD_FAIL
 function Invoke-TestCommand([string]$Script, [string[]]$Arguments, [int]$Expected = 0) {
     $output = @(& pwsh -NoProfile -File $Script @Arguments 2>&1) -join "`n"
     if ($LASTEXITCODE -ne $Expected) { throw "Unexpected command result: $output" }
@@ -18,12 +18,13 @@ try {
     [IO.File]::WriteAllText($config, '')
     [IO.File]::WriteAllText((Join-Path $configDir 'allowed-roots'), (Join-Path $work 'allowed') + "`n")
     [IO.File]::WriteAllText((Join-Path $configDir 'profiles/demo.profile'), "PROFILE=demo`nBASE_IMAGE=node:24-bookworm-slim`nPI_VERSION=1.0.0`nTOOL=go@1.26.0`nENV_SECRET=API_TOKEN=api-token`n")
-    [IO.File]::WriteAllText((Join-Path $bin 'podman.ps1'), 'Add-Content -LiteralPath $env:PODMAN_LOG -Value ($args -join " "); exit 0')
+    [IO.File]::WriteAllText((Join-Path $bin 'podman.ps1'), 'Add-Content -LiteralPath $env:PODMAN_LOG -Value ($args -join " "); if ($env:PODMAN_BUILD_FAIL -eq "1" -and $args[0] -eq "build") { exit 47 }; exit 0')
     $nativeStub = @'
 @echo off
 echo %*>>"%PODMAN_LOG%"
+if "%PODMAN_BUILD_FAIL%"=="1" if "%1"=="build" exit /b 47
 if "%1"=="info" echo {"host":{"security":{"rootless":true}}}
-if "%1 %2"=="image inspect" echo [{"Config":{"Labels":{"io.pi-sandbox.template-version":"2","io.pi-sandbox.capabilities":"glab-device"}}}]
+if "%1 %2"=="image inspect" echo [{"Config":{"Labels":{"io.pi-sandbox.template-version":"3","io.pi-sandbox.capabilities":"glab-device"}}}]
 exit /b 0
 '@
     [IO.File]::WriteAllText((Join-Path $bin 'podman.cmd'), $nativeStub)
@@ -52,10 +53,12 @@ exit /b 0
     if (-not $output.Contains('Doctor would check Podman')) { throw 'Doctor preview missing' }
     $output = Invoke-TestCommand $runner @('--config', $config, '--workspace', $project, '--doctor')
     if (-not $output.Contains('OK: rootless Podman') -or -not $output.Contains('referenced Podman secret exists: api-token')) { throw "Doctor execution failed: $output" }
+    $env:PODMAN_BUILD_FAIL = '1'
+    Invoke-TestCommand (Join-Path $root 'pi-sandbox-create.ps1') @('--config', $config, '--update', '--regenerate-containerfile') 47 | Out-Null
+    $env:PODMAN_BUILD_FAIL = $oldBuildFailure
     Write-Output 'Windows creation and runtime improvement tests passed.'
 }
 finally {
-    $env:PATH = $oldPath; $env:PODMAN_LOG = $oldLog
+    $env:PATH = $oldPath; $env:PODMAN_LOG = $oldLog; $env:PODMAN_BUILD_FAIL = $oldBuildFailure
     Remove-Item -LiteralPath $work -Recurse -Force
 }
-

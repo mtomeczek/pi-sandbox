@@ -36,8 +36,8 @@ CONFIG_TEMPLATE="${SCRIPT_DIR}/templates/create.config.template"
 PROFILE_MANIFEST_TEMPLATE="${SCRIPT_DIR}/templates/profile.template"
 
 IMAGE="pi-sandbox:latest"
-BASE_IMAGE="node:24-bookworm-slim"
-PI_VERSION="1.4.0"
+BASE_IMAGE="debian:bookworm-slim"
+PI_VERSION="1.5.0"
 CONTAINER_USER="pi"
 CONTAINER_UID=1000
 CONTAINER_GID=1000
@@ -390,6 +390,8 @@ image_exists() { podman image exists "$IMAGE"; }
 build_image() {
     local context; context="$(mktemp -d)" || { err "Cannot create temporary build context"; exit 1; }
     trap 'rm -rf "${context:-}"' RETURN
+    mkdir -p "$context/pi-sandbox"
+    cp "$SCRIPT_DIR"/scripts/image/*.sh "$SCRIPT_DIR"/scripts/image/*.cjs "$context/pi-sandbox/"
     log "Building $IMAGE"
     echo "    Pi:            $PI_VERSION"
     echo "    base image:    $BASE_IMAGE"
@@ -399,7 +401,7 @@ build_image() {
         --label "io.pi-sandbox.tools=$(IFS=,; echo "${TOOL_SPECS[*]}")"
         --label "io.pi-sandbox.npm=$(IFS=,; echo "${NPM_SPECS[*]}")"
         --label "io.pi-sandbox.capabilities=gh,glab-device"
-        --label "io.pi-sandbox.template-version=2"
+        --label "io.pi-sandbox.template-version=3"
         --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
     (( NO_CACHE )) && build_args+=(--no-cache)
     (( PULL )) && build_args+=(--pull=always)
@@ -552,7 +554,7 @@ if (( CLEAN_IMAGE )); then
 fi
 
 if (( BUILD || UPDATE )) && (( ! REGENERATE_CONTAINERFILE )) && [[ -f "$CONTAINERFILE" ]] && {
-    ! grep -Fq "# pi-sandbox template revision: 2" "$CONTAINERFILE" ||
+    ! grep -Fq "# pi-sandbox template revision: 3" "$CONTAINERFILE" ||
     [[ "$CONTAINERFILE_TEMPLATE" -nt "$CONTAINERFILE" || "$SNIPPET_TEMPLATE" -nt "$CONTAINERFILE" ]] ||
     [[ -n "$PROFILE_FILE" && "$PROFILE_FILE" -nt "$CONTAINERFILE" ]]
 }; then

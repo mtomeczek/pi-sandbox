@@ -2,7 +2,9 @@
 
 Create and build Pi sandbox images with Windows Podman and PowerShell 7.
 
-All images include GitHub CLI (`gh`) from Debian and GitLab CLI (`glab`) v1.124.0 for amd64 and arm64. The glab archive is verified against the release's SHA-256 checksum. Builds verify that `glab auth login` supports `--device`. For existing images, use `pi-sandbox-create.ps1 PROFILE --regenerate-containerfile --update` to apply the updated standard tools. Authenticate using host `--env` options or profile `ENV_SECRET` references; credentials are not included in the image.
+All images include GitHub CLI (`gh`) v2.103.3 and GitLab CLI (`glab`) v1.128.0 for amd64 and arm64. Both archives are verified against their releases' SHA-256 checksums. Builds verify that `glab auth login` supports `--device`. For existing images, use `pi-sandbox-create.ps1 PROFILE --regenerate-containerfile --update` to apply the updated standard tools. Authenticate using host `--env` options or profile `ENV_SECRET` references; credentials are not included in the image.
+
+The Windows creator builds Linux images and runs the official `https://pi.dev/install.sh` installer inside them. It does not install Pi or Node.js on the Windows host. The default runtime base is `debian:bookworm-slim`; a separate build stage supplies a private Node.js runtime under `/opt/pi/node`. Pi lives under `/opt/pi/agent`, outside the mounted state directory, and project Node.js versions remain independent under fnm. Existing saved Node base images must be changed explicitly to remove system-wide Node.js. See [Pi installation details](sandbox-management.md#pi-installation-and-private-nodejs).
 
 ## Validation and version management
 
@@ -29,7 +31,7 @@ Command-line values take precedence over saved profile settings. This includes `
 
 ```powershell
 .\pi-sandbox-create.ps1 --build
-.\pi-sandbox-create.ps1 --create node-legacy --tool fnm@1.39.0 --extension fnm:node@14 --env FNM_VERSION_FILE_STRATEGY=recursive
+.\pi-sandbox-create.ps1 --create node-project --tool fnm@1.39.0 --extension fnm:node@24 --env FNM_VERSION_FILE_STRATEGY=recursive
 .\pi-sandbox-create.ps1 rust --build --pull
 .\pi-sandbox-create.ps1 rust --regenerate-containerfile --no-cache
 .\pi-sandbox-create.ps1 --list-images

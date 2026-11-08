@@ -3,4 +3,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
+$global:LASTEXITCODE = 0
 & (Join-Path $PSScriptRoot 'scripts\windows\pi-sandbox-create.ps1') @args
+exit $LASTEXITCODE
